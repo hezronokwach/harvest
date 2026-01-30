@@ -1,0 +1,7 @@
+hume[evi]
+livekit-agents
+livekit-plugins-hume
+python-dotenv
+requests
+fastapi
+uvicorn
