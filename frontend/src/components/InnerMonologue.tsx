@@ -23,8 +23,8 @@ export default function InnerMonologue({ thoughts }: InnerMonologueProps) {
                     <div
                         key={thought.id}
                         className={`p-3 rounded-lg border text-xs font-mono ${thought.agent === "Juma"
-                                ? "bg-orange-500/5 border-orange-500/20"
-                                : "bg-blue-500/5 border-blue-500/20"
+                            ? "bg-orange-500/5 border-orange-500/20"
+                            : "bg-blue-500/5 border-blue-500/20"
                             }`}
                     >
                         <div className="flex justify-between items-center mb-1">
@@ -33,7 +33,7 @@ export default function InnerMonologue({ thoughts }: InnerMonologueProps) {
                             </span>
                             <span className="text-[10px] text-gray-600 uppercase italic">{thought.type}</span>
                         </div>
-                        <p className="text-gray-300 leading-relaxed italic">"{thought.text}"</p>
+                        <p className="text-gray-300 leading-relaxed italic">&quot;{thought.text}&quot;</p>
                     </div>
                 ))}
             </div>
