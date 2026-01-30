@@ -2,11 +2,18 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import os
 from dotenv import load_dotenv
+from pathlib import Path
 from livekit import api
 from livekit.api import CreateAgentDispatchRequest
 
 
-load_dotenv()
+if not load_dotenv():
+    # If that fails or file missing, try parent dir
+    env_path = Path(__file__).parent.parent / ".env"
+    load_dotenv(dotenv_path=env_path)
+
+if not os.getenv("LIVEKIT_URL") and os.getenv("NEXT_PUBLIC_LIVEKIT_URL"):
+    os.environ["LIVEKIT_URL"] = os.getenv("NEXT_PUBLIC_LIVEKIT_URL")
 
 app = FastAPI(title="EchoYield Backend")
 
@@ -31,8 +38,8 @@ async def get_hume_token():
     import requests
     from requests.auth import HTTPBasicAuth
     
-    api_key = os.getenv("NEXT_PUBLIC_HUME_API_KEY")
-    api_secret = os.getenv("NEXT_PUBLIC_HUME_SECRET_KEY")
+    api_key = os.getenv("HUME_API_KEY")
+    api_secret = os.getenv("HUME_API_SECRET")
 
     if not api_key or not api_secret:
         raise HTTPException(status_code=500, detail="Hume credentials not configured")

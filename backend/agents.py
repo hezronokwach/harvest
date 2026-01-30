@@ -12,7 +12,16 @@ from livekit.plugins import silero, noise_cancellation, deepgram, groq, hume
 from livekit import rtc
 import logging
 
-load_dotenv()
+import os
+from pathlib import Path
+
+if not load_dotenv():
+    # If that fails or file missing, try parent dir
+    env_path = Path(__file__).parent.parent / ".env"
+    load_dotenv(dotenv_path=env_path)
+
+if not os.getenv("LIVEKIT_URL") and os.getenv("NEXT_PUBLIC_LIVEKIT_URL"):
+    os.environ["LIVEKIT_URL"] = os.getenv("NEXT_PUBLIC_LIVEKIT_URL")
 logger = logging.getLogger("negotiation-agent")
 logger.setLevel(logging.INFO)
 
