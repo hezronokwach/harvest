@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import os
 from dotenv import load_dotenv
 from livekit import api
+from livekit.api import CreateAgentDispatchRequest
+
 
 load_dotenv()
 
@@ -72,9 +74,6 @@ async def get_livekit_token(participant_name: str, room_name: str = "BARN_ROOM_0
 
 @app.post("/livekit/dispatch")
 async def dispatch_agents(room_name: str = "BARN_ROOM_01"):
-    """
-    Explicitly dispatches Juma and Alex agents into the room.
-    """
     api_key = os.getenv("LIVEKIT_API_KEY")
     api_secret = os.getenv("LIVEKIT_API_SECRET")
     lk_url = os.getenv("LIVEKIT_URL")
@@ -82,29 +81,33 @@ async def dispatch_agents(room_name: str = "BARN_ROOM_01"):
     if not api_key or not api_secret or not lk_url:
         raise HTTPException(status_code=500, detail="LiveKit credentials not configured")
 
-    # Use the livekit.api RoomServiceClient to dispatch agents
-    # This requires the LiveKit Agent Worker (agents.py) to be running and registered with 'juma-agent' and 'alex-agent'
     client = api.LiveKitAPI(lk_url, api_key, api_secret)
-    
+
     try:
         # Dispatch Juma
-        await client.agent.create_dispatch(
-            room=room_name,
-            agent_name="juma-agent"
+        await client.agent_dispatch.create_dispatch(
+            CreateAgentDispatchRequest(
+                room=room_name,
+                agent_name="juma-agent",
+                metadata='{"role": "seller", "persona": "Juma"}',
+            )
         )
-        
+
         # Dispatch Alex
-        await client.agent.create_dispatch(
-            room=room_name,
-            agent_name="alex-agent"
+        await client.agent_dispatch.create_dispatch(
+            CreateAgentDispatchRequest(
+                room=room_name,
+                agent_name="alex-agent",
+                metadata='{"role": "buyer", "persona": "Alex"}',
+            )
         )
-        
+
         await client.aclose()
         return {"status": "dispatched", "agents": ["juma-agent", "alex-agent"]}
+
     except Exception as e:
         await client.aclose()
-        print(f"Dispatch Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to dispatch agents: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/market-price/{crop}")
 async def get_market_price(crop: str):

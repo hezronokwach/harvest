@@ -9,10 +9,12 @@ from livekit.agents import (
     room_io,
 )
 from livekit.plugins import silero, noise_cancellation, deepgram, groq, hume
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit import rtc
+import logging
 
 load_dotenv()
+logger = logging.getLogger("negotiation-agent")
+logger.setLevel(logging.INFO)
 
 # -----------------------
 # Shared base agent
@@ -27,86 +29,86 @@ class NegotiationAgent(Agent):
 server = AgentServer()
 
 def prewarm(proc: JobProcess):
-    proc.userdata["vad"] = silero.VAD.load()
+    try:
+        proc.userdata["vad"] = silero.VAD.load()
+        logger.info("VAD model prewarmed")
+    except Exception as e:
+        logger.error(f"Failed to prewarm VAD: {e}")
 
 server.setup_fnc = prewarm
 
 # -----------------------
-# Juma agent
+# Unified Entrypoint
 # -----------------------
-@server.rtc_session(agent_name="juma-agent")
-async def juma_entrypoint(ctx: JobContext):
-    session = AgentSession(
-        stt=deepgram.STT(),
-        llm=groq.LLM(model="llama-3.3-70b-versatile"),
-        tts=hume.TTS(
-            voice=hume.VoiceByName(
-                name="Male English Actor",
-                provider=hume.VoiceProvider.hume,
+@server.rtc_session()
+async def negotiation_entrypoint(ctx: JobContext):
+    agent_name = ctx.job.agent_name
+    logger.info(f"Incoming dispatch request. Agent Name: '{agent_name}' in room: {ctx.room.name}")
+
+    if agent_name == "juma-agent":
+        instructions = (
+            "You are Juma, a protective and firm maize farmer. "
+            "Your goal is to sell your harvest for at least $1.15/kg. "
+            "You speak with a warm but steady tone. "
+            "Defend your price using tactical empathy. Speak concisely."
+        )
+        voice_name = "Male English Actor"
+        thought_text = "Starting negotiation. I need to hold firm at $1.25 to see how Alex reacts."
+    elif agent_name == "alex-agent":
+        instructions = (
+            "You are Alex, a skeptical and hurried commodity buyer. "
+            "Your goal is to buy maize for as low as possible, ideally $0.90/kg. "
+            "You sound impatient and try to anchor the price low. Speak concisely."
+        )
+        voice_name = "Kora" # Soft Female Voice
+        thought_text = "I will try to anchor the price low at $0.85. Juma looks like he needs the cash."
+    else:
+        logger.warning(f"Unexpected agent name: '{agent_name}'. Job ID: {ctx.job.id}")
+        return
+
+    try:
+        # Explicitly connect to the room before starting the session
+        await ctx.connect()
+        logger.info(f"Connected to room: {ctx.room.name}")
+
+        session = AgentSession(
+            stt=deepgram.STT(),
+            llm=groq.LLM(model="llama-3.3-70b-versatile"),
+            tts=hume.TTS(
+                voice=hume.VoiceByName(
+                    name=voice_name,
+                    provider=hume.VoiceProvider.hume,
+                ),
+                instant_mode=True,
             ),
-            instant_mode=True,
-        ),
-        vad=ctx.proc.userdata["vad"],
-        turn_detection=MultilingualModel(),
-    )
+            vad=ctx.proc.userdata["vad"],
+        )
 
-    await session.start(
-        agent=NegotiationAgent(
-            instructions=(
-                "You are Juma, a protective and firm maize farmer. "
-                "Your goal is to sell your harvest for at least $1.15/kg. "
-                "You speak with a warm but steady tone. "
-                "Defend your price using tactical empathy. Speak concisely."
-            )
-        ),
-        room=ctx.room,
-        room_options=room_io.RoomOptions(
-            audio_input=room_io.AudioInputOptions(
-                noise_cancellation=lambda p:
-                noise_cancellation.BVC()
-                if p.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD
-                else noise_cancellation.BVCTelephony(),
-            )
-        ),
-    )
-
-    await session.generate_reply(
-        instructions="Join the negotiation and greet Alex confidently."
-    )
-
-# -----------------------
-# Alex agent
-# -----------------------
-@server.rtc_session(agent_name="alex-agent")
-async def alex_entrypoint(ctx: JobContext):
-    session = AgentSession(
-        stt=deepgram.STT(),
-        llm=groq.LLM(model="llama-3.3-70b-versatile"),
-        tts=hume.TTS(
-            voice=hume.VoiceByName(
-                name="Kora",
-                provider=hume.VoiceProvider.hume,
+        await session.start(
+            agent=NegotiationAgent(instructions=instructions),
+            room=ctx.room,
+            room_options=room_io.RoomOptions(
+                audio_input=room_io.AudioInputOptions(
+                    noise_cancellation=lambda p:
+                    noise_cancellation.BVC()
+                    if p.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD
+                    else noise_cancellation.BVCTelephony(),
+                )
             ),
-            instant_mode=True,
-        ),
-        vad=ctx.proc.userdata["vad"],
-        turn_detection=MultilingualModel(),
-    )
+        )
 
-    await session.start(
-        agent=NegotiationAgent(
-            instructions=(
-                "You are Alex, a skeptical and hurried commodity buyer. "
-                "Your goal is to buy maize for as low as possible, ideally $0.90/kg. "
-                "You sound impatient and try to anchor the price low. Speak concisely."
-            )
-        ),
-        room=ctx.room,
-    )
+        # Emit an initial thought
+        await ctx.room.local_participant.publish_data(
+            f'{{"type": "thought", "text": "{thought_text}"}}'
+        )
+        logger.info(f"Session started for {agent_name}")
 
-    await session.generate_reply(
-        instructions="Open negotiations aggressively."
-    )
+        await session.generate_reply(
+            instructions=f"Greet the other party as {agent_name.replace('-agent', '')}."
+        )
+    except Exception as e:
+        logger.error(f"Error in negotiation session: {e}", exc_info=True)
+        await ctx.shutdown()
 
 # -----------------------
 # Start worker

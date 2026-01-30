@@ -6,6 +6,7 @@ livekit-plugins-groq
 livekit-plugins-deepgram
 livekit-plugins-silero
 livekit-plugins-noise-cancellation
+livekit-plugins-turn-detector
 python-dotenv
 requests
 fastapi
