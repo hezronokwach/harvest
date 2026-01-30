@@ -1,11 +1,14 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import EmotionRadar from "@/components/EmotionRadar";
 import PriceGapSlider from "@/components/PriceGapSlider";
 import InnerMonologue from "@/components/InnerMonologue";
+import VoiceAgent from "@/components/VoiceAgent";
 
 export default function Home() {
+  const [humeAccessToken, setHumeAccessToken] = useState<string | null>(null);
+
   const [jumaEmotions, setJumaEmotions] = useState({
     confidence: 0.85,
     stress: 0.12,
@@ -24,7 +27,12 @@ export default function Home() {
     target: 1.15,
   });
 
-  const [thoughts, setThoughts] = useState([
+  const [thoughts, setThoughts] = useState<Array<{
+    id: string;
+    agent: string;
+    text: string;
+    type: "strategy" | "insight" | "warning";
+  }>>([
     {
       id: "1",
       agent: "Alex",
@@ -37,13 +45,28 @@ export default function Home() {
       text: "Alex sounds hurried. I'm holding the anchor at $1.25 for another round.",
       type: "strategy" as const,
     },
-    {
-      id: "3",
-      agent: "Juma",
-      text: "Detecting high stress in Buyer's vocal tone. Mirroring silence to force a move.",
-      type: "insight" as const,
-    },
   ]);
+
+  useEffect(() => {
+    // Fetch Hume token from our backend
+    const fetchTokens = async () => {
+      try {
+        const response = await fetch("http://localhost:8000/hume/token");
+        const data = await response.json();
+        setHumeAccessToken(data.accessToken);
+      } catch (error) {
+        console.error("Failed to fetch tokens:", error);
+      }
+    };
+    fetchTokens();
+  }, []);
+
+  const addThought = React.useCallback((agent: string, text: string) => {
+    setThoughts((prev) => [
+      { id: Date.now().toString(), agent, text, type: "insight" },
+      ...prev.slice(0, 9),
+    ]);
+  }, []);
 
   return (
     <main className="min-h-screen bg-[#050505] text-white p-8 font-sans selection:bg-orange-500/30">
@@ -56,16 +79,32 @@ export default function Home() {
           </h1>
           <p className="text-gray-500 text-xs mt-1 uppercase tracking-widest">Farmer's Strategic Negotiation Hub</p>
         </div>
-        <div className="flex gap-4">
+        <div className="flex gap-6 items-center">
+          {/* Agent Status Controllers */}
+          {humeAccessToken && (
+            <div className="flex gap-6 pr-6 border-r border-white/10">
+              <VoiceAgent
+                name="Juma"
+                configId={process.env.NEXT_PUBLIC_SELLER_HUME_CONFIG_ID || ""}
+                accessToken={humeAccessToken}
+                onEmotionsUpdate={setJumaEmotions}
+                onThoughtUpdate={(t) => addThought("Juma", t)}
+              />
+              <VoiceAgent
+                name="Alex"
+                configId={process.env.NEXT_PUBLIC_BUYER_HUME_CONFIG_ID || ""}
+                accessToken={humeAccessToken}
+                onEmotionsUpdate={setAlexEmotions}
+                onThoughtUpdate={(t) => addThought("Alex", t)}
+              />
+            </div>
+          )}
           <div className="text-right">
             <p className="text-[10px] text-gray-600 uppercase">LiveKit Room</p>
             <p className="text-xs font-mono text-green-500 flex items-center gap-1.5">
               <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" /> BARN_ROOM_01
             </p>
           </div>
-          <button className="bg-orange-500 hover:bg-orange-600 px-6 py-2 rounded-lg text-sm font-bold text-black transition-all">
-            MANUAL OVERRIDE
-          </button>
         </div>
       </div>
 
