@@ -47,7 +47,10 @@ export default function Home() {
     },
   ]);
 
+  const [hasMounted, setHasMounted] = useState(false);
+
   useEffect(() => {
+    setHasMounted(true);
     // Fetch Hume token from our backend
     const fetchTokens = async () => {
       try {
@@ -127,7 +130,7 @@ export default function Home() {
           {/* Connection Status / Visualizer Placeholder */}
           <div className="h-48 rounded-xl bg-gradient-to-t from-orange-500/5 to-transparent border border-white/5 flex items-center justify-center">
             <div className="flex gap-1 items-center">
-              {[...Array(20)].map((_, i) => (
+              {hasMounted && [...Array(20)].map((_, i) => (
                 <div
                   key={i}
                   className="w-1 bg-orange-500/40 rounded-full animate-bounce"
@@ -138,7 +141,7 @@ export default function Home() {
                 />
               ))}
               <p className="mx-4 text-xs font-mono text-gray-500 uppercase">Negotiation Audio Stream Active</p>
-              {[...Array(20)].map((_, i) => (
+              {hasMounted && [...Array(20)].map((_, i) => (
                 <div
                   key={i}
                   className="w-1 bg-blue-500/40 rounded-full animate-bounce"
