@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import os
 from dotenv import load_dotenv
 from livekit import api
@@ -6,6 +7,15 @@ from livekit import api
 load_dotenv()
 
 app = FastAPI(title="EchoYield Backend")
+
+# Add CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In production, replace with specific origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 async def root():
@@ -17,26 +27,27 @@ async def get_hume_token():
     Fetches a Hume access token using the API key and Secret.
     """
     import requests
-    api_key = os.getenv("HUME_API_KEY")
-    api_secret = os.getenv("HUME_SECRET_KEY")
+    from requests.auth import HTTPBasicAuth
     
-    if not api_key or not api_secret:
-        # Fallback to NEXT_PUBLIC versions if added by user
-        api_key = os.getenv("NEXT_PUBLIC_HUME_API_KEY")
-        api_secret = os.getenv("NEXT_PUBLIC_HUME_SECRET_KEY")
+    api_key = os.getenv("NEXT_PUBLIC_HUME_API_KEY")
+    api_secret = os.getenv("NEXT_PUBLIC_HUME_SECRET_KEY")
 
     if not api_key or not api_secret:
         raise HTTPException(status_code=500, detail="Hume credentials not configured")
 
-    # In a real app, you'd exchange these for a short-lived token
-    # For this demo/sprint, we'll return the keys or a placeholder if a real exchange is needed
-    # Actually Hume SDK usually expects the API key or a session token.
-    # We will implement the proper sequence:
-    auth_url = "https://api.hume.ai/v0/auth/token"
-    # Basic auth exchange (placeholder for actual Hume auth flow if different)
-    # Hume uses the API key directly in many cases, but for security, a token is preferred.
-    
-    return {"accessToken": api_key} # Placeholder: Hume SDK can take API Key directly if configured
+    try:
+        res = requests.post(
+            "https://api.hume.ai/oauth2-cc/token",
+            auth=HTTPBasicAuth(api_key, api_secret),
+            data={"grant_type": "client_credentials"},
+            timeout=10
+        )
+        res.raise_for_status()
+        data = res.json()
+        return {"accessToken": data["access_token"]}
+    except Exception as e:
+        print(f"Hume Token Fetch Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch Hume access token: {str(e)}")
 
 @app.get("/livekit/token")
 async def get_livekit_token(participant_name: str, room_name: str = "BARN_ROOM_01"):
@@ -58,6 +69,42 @@ async def get_livekit_token(participant_name: str, room_name: str = "BARN_ROOM_0
         ))
 
     return {"token": token.to_jwt()}
+
+@app.post("/livekit/dispatch")
+async def dispatch_agents(room_name: str = "BARN_ROOM_01"):
+    """
+    Explicitly dispatches Juma and Alex agents into the room.
+    """
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    lk_url = os.getenv("LIVEKIT_URL")
+
+    if not api_key or not api_secret or not lk_url:
+        raise HTTPException(status_code=500, detail="LiveKit credentials not configured")
+
+    # Use the livekit.api RoomServiceClient to dispatch agents
+    # This requires the LiveKit Agent Worker (agents.py) to be running and registered with 'juma-agent' and 'alex-agent'
+    client = api.LiveKitAPI(lk_url, api_key, api_secret)
+    
+    try:
+        # Dispatch Juma
+        await client.agent.create_dispatch(
+            room=room_name,
+            agent_name="juma-agent"
+        )
+        
+        # Dispatch Alex
+        await client.agent.create_dispatch(
+            room=room_name,
+            agent_name="alex-agent"
+        )
+        
+        await client.aclose()
+        return {"status": "dispatched", "agents": ["juma-agent", "alex-agent"]}
+    except Exception as e:
+        await client.aclose()
+        print(f"Dispatch Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to dispatch agents: {str(e)}")
 
 @app.get("/market-price/{crop}")
 async def get_market_price(crop: str):
