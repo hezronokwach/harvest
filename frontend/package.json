@@ -9,6 +9,11 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@humeai/voice": "^0.1.10",
+    "@humeai/voice-react": "^0.2.12",
+    "@livekit/components-react": "^2.9.19",
+    "livekit-client": "^2.17.0",
+    "lucide-react": "^0.563.0",
     "next": "16.1.6",
     "react": "19.2.3",
     "react-dom": "19.2.3"
