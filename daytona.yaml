@@ -1,0 +1,9 @@
+projectConfigs:
+  - name: agri-agent-monorepo
+    image: daytonaio/workspace-full
+    installCommands:
+      - cd frontend && npm install
+      - cd backend && pip install -r requirements.txt
+    ports:
+      - 3000 # Next.js Dashboard
+      - 8000 # Python Logic / Webhook (if needed)
