@@ -47,6 +47,16 @@ def prewarm(proc: JobProcess):
 server.setup_fnc = prewarm
 
 # -----------------------
+# Shared Turn State (for agent-to-agent orchestration)
+# -----------------------
+TURN_STATE = {
+    "current": "juma",  # Who has the turn
+    "rounds": 0,        # How many exchanges have happened
+    "max_rounds": 8,    # Stop after this many turns
+    "sessions": {},     # Maps agent_name -> AgentSession
+}
+
+# -----------------------
 # Unified Entrypoint
 # -----------------------
 @server.rtc_session()
@@ -135,31 +145,88 @@ async def negotiation_entrypoint(ctx: JobContext):
         )
         logger.info(f"Session started for {agent_name}")
 
-        # Agent-to-Agent Turn Orchestration
-        # When the OTHER agent finishes speaking, trigger this agent to respond
-        def on_agent_speech_committed(speech_handle):
-            """Called when ANY agent (including self) finishes speaking"""
-            # Determine who just spoke
-            speaker_identity = speech_handle.agent.label if hasattr(speech_handle, 'agent') else "unknown"
-            
-            # Only respond if the OTHER agent spoke
-            if agent_name == "alex-agent" and "juma" in speaker_identity.lower():
-                logger.info(f"[{agent_name}] Juma finished speaking, Alex will respond...")
-                session.generate_reply(
-                    instructions="Respond to Juma's offer. Counter with a lower price or negotiate."
-                )
-            elif agent_name == "juma-agent" and "alex" in speaker_identity.lower():
-                logger.info(f"[{agent_name}] Alex finished speaking, Juma will respond...")
-                session.generate_reply(
-                    instructions="Respond to Alex's counter-offer. Defend your price or negotiate."
-                )
+        # Register this session in shared state
+        TURN_STATE["sessions"][agent_name] = session
 
-        session.on("agent_speech_committed", on_agent_speech_committed)
+        # Agent-to-Agent Turn Orchestration
+        # Use conversation_item_added to get the ACTUAL text spoken
+        def on_conversation_item(event):
+            """Called when a conversation item (message) is added"""
+            import asyncio
+            
+            # Unwrap the actual conversation item from the event
+            item = event.item
+            
+            # Only react to agent speech (not user input)
+            if item.role != "assistant":
+                return
+            
+            # ✅ Only react if it's THIS agent's turn
+            # This is the single source of truth for turn ownership
+            if TURN_STATE["current"] != agent_name:
+                return
+            
+            # Check if we've hit max rounds
+            if TURN_STATE["rounds"] >= TURN_STATE["max_rounds"]:
+                logger.info(f"[{agent_name}] Max rounds reached, stopping negotiation")
+                return
+            
+            # Increment round counter
+            TURN_STATE["rounds"] += 1
+            
+            # Determine the other agent
+            other_agent = "alex-agent" if agent_name == "juma-agent" else "juma-agent"
+            
+            # Get the other agent's session
+            other_session = TURN_STATE["sessions"].get(other_agent)
+            if not other_session:
+                logger.warning(f"[{agent_name}] Could not find session for {other_agent}")
+                return
+            
+            logger.info(
+                f"[TURN {TURN_STATE['rounds']}] "
+                f"{agent_name} spoke. Handing turn to {other_agent}"
+            )
+            
+            # Hand over the turn BEFORE scheduling the reply
+            TURN_STATE["current"] = other_agent
+            
+            # Check if this is the last turn - if so, ask for a closing statement
+            if TURN_STATE["rounds"] == TURN_STATE["max_rounds"]:
+                async def final_turn():
+                    await asyncio.sleep(0.6)
+                    other_session.generate_reply(
+                        instructions=(
+                            f"You are responding to this final statement:\n\n"
+                            f'"{item.content}"\n\n'
+                            f"Summarize the negotiation outcome in one sentence and say goodbye."
+                        ),
+                        allow_interruptions=False,
+                    )
+                asyncio.create_task(final_turn())
+                return
+            
+            # Async handoff with proper delay and context
+            async def handoff():
+                await asyncio.sleep(0.6)  # Natural pacing
+                other_session.generate_reply(
+                    instructions=(
+                        f"You are responding to this statement:\n\n"
+                        f'"{item.content}"\n\n'
+                        f"Continue the negotiation naturally."
+                    ),
+                    allow_interruptions=False,
+                )
+            
+            asyncio.create_task(handoff())
+
+        session.on("conversation_item_added", on_conversation_item)
 
         # Leader/Follower Logic: Only Juma starts the conversation
         if agent_name == "juma-agent":
             await session.generate_reply(
-                instructions="Greet the buyer (Alex) confidently and state your asking price for the harvest."
+                instructions="Greet Alex briefly and state your price. Keep it short - one or two sentences max.",
+                allow_interruptions=False,
             )
         else:
             # Alex waits for Juma to speak first
