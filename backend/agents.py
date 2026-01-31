@@ -36,6 +36,18 @@ STATE = {
     "sessions": {},
 }
 
+def negotiation_has_ended(text: str) -> bool:
+        keywords = [
+            "deal accepted",
+            "we have a deal",
+            "agreed price",
+            "let's proceed",
+            "no deal",
+            "cannot agree",
+            "walk away"
+        ]
+        text_lower = text.lower()
+        return any(k in text_lower for k in keywords)
 # -------------------------------------------------
 # Agent
 # -------------------------------------------------
@@ -132,25 +144,60 @@ async def entrypoint(ctx: JobContext):
     # TURN CHAINING (THIS IS THE IMPORTANT PART)
     # -------------------------------------------------
 
+    
+
     async def juma_after_speech(text: str):
         STATE["rounds"] += 1
-        logger.info(f"[ROUND {STATE['rounds']}] Juma finished")
+        logger.info(f"[ROUND {STATE['rounds']}] Halima finished")
 
-        if STATE["rounds"] >= STATE["max_rounds"]:
+        # ✅ Natural ending
+        if negotiation_has_ended(text) or STATE["rounds"] >= STATE["max_rounds"]:
             await session.generate_reply(
-                instructions="Summarize the deal and say goodbye.",
+                instructions=(
+                    "Politely summarize the outcome of the negotiation in one sentence "
+                    "and end the conversation respectfully. Say goodbye."
+                ),
                 allow_interruptions=False,
             )
+            # Wait for the final message to be spoken
+            await asyncio.sleep(3)
+            
+            # Close both sessions and disconnect
+            logger.info("Negotiation ended. Closing sessions...")
+            for agent_session in STATE["sessions"].values():
+                try:
+                    await agent_session.close()
+                except Exception as e:
+                    logger.warning(f"Error closing session: {e}")
+            
+            # Disconnect from room
+            await ctx.room.disconnect()
             return
 
         await STATE["sessions"]["alex-agent"].generate_reply(
-            instructions=f"Respond to Juma:\n{text}",
+            instructions=f"Respond respectfully to Halima:\n{text}",
             allow_interruptions=False,
         )
 
     async def alex_after_speech(text: str):
+        if negotiation_has_ended(text):
+            logger.info("Deal reached! Ending negotiation...")
+            # Wait a moment then close
+            await asyncio.sleep(2)
+            
+            # Close both sessions
+            for agent_session in STATE["sessions"].values():
+                try:
+                    await agent_session.close()
+                except Exception as e:
+                    logger.warning(f"Error closing session: {e}")
+            
+            # Disconnect from room
+            await ctx.room.disconnect()
+            return
+
         await STATE["sessions"]["juma-agent"].generate_reply(
-            instructions=f"Respond to Alex:\n{text}",
+            instructions=f"Respond respectfully to Alex:\n{text}",
             allow_interruptions=False,
         )
 
