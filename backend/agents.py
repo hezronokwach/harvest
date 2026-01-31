@@ -150,6 +150,17 @@ async def entrypoint(ctx: JobContext):
         STATE["rounds"] += 1
         logger.info(f"[ROUND {STATE['rounds']}] Halima finished")
 
+        # Notify frontend of round update
+        try:
+            await ctx.room.local_participant.publish_data(
+                json.dumps({
+                    "type": "round_update",
+                    "round": STATE["rounds"]
+                })
+            )
+        except Exception as e:
+            logger.warning(f"Failed to publish round update: {e}")
+
         # ✅ Natural ending
         if negotiation_has_ended(text) or STATE["rounds"] >= STATE["max_rounds"]:
             await session.generate_reply(
