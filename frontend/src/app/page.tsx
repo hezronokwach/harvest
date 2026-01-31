@@ -102,7 +102,6 @@ export default function Home() {
           connect={true}
           onConnected={() => {
             console.log("Connected to LiveKit!");
-            dispatchAgents();
           }}
           className="h-full"
         >
