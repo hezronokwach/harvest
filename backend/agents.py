@@ -171,9 +171,12 @@ async def entrypoint(ctx: JobContext):
     # -------------------------------------------------
     if agent_name == "juma-agent":
         await session.generate_reply(
-            instructions="State your maize price clearly.",
-            allow_interruptions=False,
-        )
+        instructions=(
+            "Greet Alex politely and state your starting price, "
+            "while expressing openness to a fair discussion."
+        ),
+        allow_interruptions=False,
+    )
 
     # -------------------------------------------------
     # Keep alive
