@@ -118,7 +118,14 @@ async def negotiation_entrypoint(ctx: JobContext):
                     noise_cancellation.BVC()
                     if p.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD
                     else noise_cancellation.BVCTelephony(),
-                )
+                ),
+                # CRITICAL: Allow agents to listen to other agents (for bot-to-bot negotiation)
+                participant_kinds=[
+                    rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD,
+                    rtc.ParticipantKind.PARTICIPANT_KIND_AGENT,
+                    rtc.ParticipantKind.PARTICIPANT_KIND_SIP,
+                    rtc.ParticipantKind.PARTICIPANT_KIND_CONNECTOR,
+                ]
             ),
         )
 
@@ -128,6 +135,27 @@ async def negotiation_entrypoint(ctx: JobContext):
         )
         logger.info(f"Session started for {agent_name}")
 
+        # Agent-to-Agent Turn Orchestration
+        # When the OTHER agent finishes speaking, trigger this agent to respond
+        def on_agent_speech_committed(speech_handle):
+            """Called when ANY agent (including self) finishes speaking"""
+            # Determine who just spoke
+            speaker_identity = speech_handle.agent.label if hasattr(speech_handle, 'agent') else "unknown"
+            
+            # Only respond if the OTHER agent spoke
+            if agent_name == "alex-agent" and "juma" in speaker_identity.lower():
+                logger.info(f"[{agent_name}] Juma finished speaking, Alex will respond...")
+                session.generate_reply(
+                    instructions="Respond to Juma's offer. Counter with a lower price or negotiate."
+                )
+            elif agent_name == "juma-agent" and "alex" in speaker_identity.lower():
+                logger.info(f"[{agent_name}] Alex finished speaking, Juma will respond...")
+                session.generate_reply(
+                    instructions="Respond to Alex's counter-offer. Defend your price or negotiate."
+                )
+
+        session.on("agent_speech_committed", on_agent_speech_committed)
+
         # Leader/Follower Logic: Only Juma starts the conversation
         if agent_name == "juma-agent":
             await session.generate_reply(
@@ -136,6 +164,7 @@ async def negotiation_entrypoint(ctx: JobContext):
         else:
             # Alex waits for Juma to speak first
             logger.info("Alex is waiting for Juma to speak...")
+        
         # Keep the session running by waiting for the user to leave
         # This prevents the entrypoint from exiting and closing the session prematurely
         def p_disconnect(p: rtc.RemoteParticipant):
