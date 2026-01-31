@@ -54,6 +54,22 @@ async def negotiation_entrypoint(ctx: JobContext):
     agent_name = ctx.job.agent_name
     logger.info(f"Incoming dispatch request. Agent Name: '{agent_name}' in room: {ctx.room.name}")
 
+    # If it's the generic worker name, or empty, check metadata
+    if agent_name == "negotiation-worker" or not agent_name:
+        if ctx.job.metadata:
+            import json
+            try:
+                meta = json.loads(ctx.job.metadata)
+                if meta.get("persona") == "Juma":
+                    agent_name = "juma-agent"
+                elif meta.get("persona") == "Alex":
+                    agent_name = "alex-agent"
+                logger.info(f"Resolved agent name from metadata: {agent_name}")
+            except Exception as e:
+                logger.warning(f"Failed to parse metadata: {e}")
+        else:
+             logger.warning("No metadata provided for generic dispatch")
+
     if agent_name == "juma-agent":
         instructions = (
             "You are Juma, a protective and firm maize farmer. "
@@ -122,5 +138,18 @@ async def negotiation_entrypoint(ctx: JobContext):
 # -----------------------
 # Start worker
 # -----------------------
+from livekit.agents import WorkerOptions
+
 if __name__ == "__main__":
-    cli.run_app(server)
+    # Enable more verbose logging for debugging
+    logging.basicConfig(level=logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
+    
+    # Relax load threshold for local dev (allow up to 95% CPU/Memory before rejecting)
+    opts = WorkerOptions(
+        entrypoint_fnc=negotiation_entrypoint,
+        prewarm_fnc=prewarm,
+        agent_name="negotiation-worker",
+        load_threshold=1.5,
+    )
+    cli.run_app(opts)

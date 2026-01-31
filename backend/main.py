@@ -75,6 +75,18 @@ async def get_livekit_token(participant_name: str, room_name: str = "BARN_ROOM_0
         .with_grants(api.VideoGrants(
             room_join=True,
             room=room_name,
+        )) \
+        .with_room_config(api.RoomConfiguration(
+            agents=[
+                api.RoomAgentDispatch(
+                    agent_name="negotiation-worker",
+                    metadata='{"role": "seller", "persona": "Juma"}'
+                ),
+                api.RoomAgentDispatch(
+                    agent_name="negotiation-worker",
+                    metadata='{"role": "buyer", "persona": "Alex"}'
+                )
+            ]
         ))
 
     return {"token": token.to_jwt()}
@@ -95,7 +107,7 @@ async def dispatch_agents(room_name: str = "BARN_ROOM_01"):
         await client.agent_dispatch.create_dispatch(
             CreateAgentDispatchRequest(
                 room=room_name,
-                agent_name="juma-agent",
+                agent_name="negotiation-worker",
                 metadata='{"role": "seller", "persona": "Juma"}',
             )
         )
@@ -104,7 +116,7 @@ async def dispatch_agents(room_name: str = "BARN_ROOM_01"):
         await client.agent_dispatch.create_dispatch(
             CreateAgentDispatchRequest(
                 room=room_name,
-                agent_name="alex-agent",
+                agent_name="negotiation-worker",
                 metadata='{"role": "buyer", "persona": "Alex"}',
             )
         )
