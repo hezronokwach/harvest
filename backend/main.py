@@ -91,6 +91,39 @@ async def get_livekit_token(participant_name: str, room_name: str = "BARN_ROOM_0
 
     return {"token": token.to_jwt()}
 
+@app.get("/debug/token")
+async def debug_token(participant_name: str, room_name: str = "BARN_ROOM_01"):
+    """
+    Returns the decoded token claims to verify dispatch rules.
+    """
+    import jwt
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    
+    token = api.AccessToken(api_key, api_secret) \
+        .with_identity(participant_name) \
+        .with_name(participant_name) \
+        .with_grants(api.VideoGrants(
+            room_join=True,
+            room=room_name,
+        )) \
+        .with_room_config(api.RoomConfiguration(
+            agents=[
+                api.RoomAgentDispatch(
+                    agent_name="negotiation-worker",
+                    metadata='{"role": "seller", "persona": "Juma"}'
+                ),
+                api.RoomAgentDispatch(
+                    agent_name="negotiation-worker",
+                    metadata='{"role": "buyer", "persona": "Alex"}'
+                )
+            ]
+        ))
+        
+    jwt_token = token.to_jwt()
+    decoded = jwt.decode(jwt_token, options={"verify_signature": False})
+    return {"claims": decoded}
+
 @app.post("/livekit/dispatch")
 async def dispatch_agents(room_name: str = "BARN_ROOM_01"):
     api_key = os.getenv("LIVEKIT_API_KEY")

@@ -128,12 +128,30 @@ async def negotiation_entrypoint(ctx: JobContext):
         )
         logger.info(f"Session started for {agent_name}")
 
-        await session.generate_reply(
-            instructions=f"Greet the other party as {agent_name.replace('-agent', '')}."
-        )
+        # Leader/Follower Logic: Only Juma starts the conversation
+        if agent_name == "juma-agent":
+            await session.generate_reply(
+                instructions="Greet the buyer (Alex) confidently and state your asking price for the harvest."
+            )
+        else:
+            # Alex waits for Juma to speak first
+            logger.info("Alex is waiting for Juma to speak...")
+        # Keep the session running by waiting for the user to leave
+        # This prevents the entrypoint from exiting and closing the session prematurely
+        def p_disconnect(p: rtc.RemoteParticipant):
+             logger.info(f"Participant {p.identity} disconnected")
+
+        ctx.room.on("participant_disconnected", p_disconnect)
+        
+        # Wait indefinitely until the job is closed (e.g. user leaves)
+        # We can simulate this by waiting on a future or just sleeping loop
+        import asyncio
+        while ctx.room.connection_state == rtc.ConnectionState.CONN_CONNECTED:
+            await asyncio.sleep(1)
+
     except Exception as e:
         logger.error(f"Error in negotiation session: {e}", exc_info=True)
-        await ctx.shutdown()
+        ctx.shutdown()
 
 # -----------------------
 # Start worker
