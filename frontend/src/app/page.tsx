@@ -157,7 +157,7 @@ function DashboardContent({
         const agentName = participant?.name || (participant?.identity.includes("juma") ? "Juma" : "Alex");
 
         if (data.type === "thought") {
-          const id = `${agentName}-${Date.now()}`;
+          const id = `${agentName}-${crypto.randomUUID()}`;
           setThoughts((prev: Thought[]) => [
             { id, agent: agentName, text: data.text, type: "insight" },
             ...prev.slice(0, 9),
