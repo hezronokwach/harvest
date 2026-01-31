@@ -141,7 +141,11 @@ async def negotiation_entrypoint(ctx: JobContext):
         def p_disconnect(p: rtc.RemoteParticipant):
              logger.info(f"Participant {p.identity} disconnected")
 
+        def on_track_subscribed(track: rtc.Track, publication: rtc.TrackPublication, participant: rtc.RemoteParticipant):
+            logger.info(f"[{agent_name}] Subscribed to track {track.sid} from {participant.identity} ({participant.kind})")
+
         ctx.room.on("participant_disconnected", p_disconnect)
+        ctx.room.on("track_subscribed", on_track_subscribed)
         
         # Wait indefinitely until the job is closed (e.g. user leaves)
         # We can simulate this by waiting on a future or just sleeping loop
