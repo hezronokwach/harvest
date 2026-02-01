@@ -4,10 +4,10 @@ import React, { useState, useEffect } from "react";
 import {
   LiveKitRoom,
   RoomAudioRenderer,
-  useParticipants,
+  useTracks,
   useRoomContext,
 } from "@livekit/components-react";
-import { Participant } from "livekit-client";
+import { Participant, Track } from "livekit-client";
 import EmotionRadar from "@/components/EmotionRadar";
 import PriceGapSlider from "@/components/PriceGapSlider";
 import Transcript from "@/components/Transcript";
@@ -187,9 +187,7 @@ function DashboardContent({
   setTranscripts: React.Dispatch<React.SetStateAction<Array<{ id: string; agent: string; text: string }>>>;
   hasMounted: boolean;
 }) {
-  const participants = useParticipants();
   const room = useRoomContext();
-  const [agentStatus, setAgentStatus] = useState({ halima: false, alex: false });
 
   useEffect(() => {
     if (!room) return;
@@ -289,44 +287,29 @@ function DashboardContent({
       });
     };
 
-    const handleConnected = (participant: RemoteParticipant) => {
-      if (participant.identity.includes('halima') || participant.identity.includes('juma')) {
-        setAgentStatus(prev => ({ ...prev, halima: true }));
-      } else if (participant.identity.includes('alex')) {
-        setAgentStatus(prev => ({ ...prev, alex: true }));
-      }
-    };
-
-    const handleDisconnected = (participant: RemoteParticipant) => {
-      if (participant.identity.includes('halima') || participant.identity.includes('juma')) {
-        setAgentStatus(prev => ({ ...prev, halima: false }));
-      } else if (participant.identity.includes('alex')) {
-        setAgentStatus(prev => ({ ...prev, alex: false }));
-      }
-    };
-
     room.on(RoomEvent.DataReceived, onDataReceived);
     room.on(RoomEvent.TranscriptionReceived, handleTranscription);
-    room.on(RoomEvent.ParticipantConnected, handleConnected);
-    room.on(RoomEvent.ParticipantDisconnected, handleDisconnected);
-
-    // Initial status check
-    room.remoteParticipants.forEach(p => {
-      if (p.identity.includes('halima') || p.identity.includes('juma')) setAgentStatus(prev => ({ ...prev, halima: true }));
-      if (p.identity.includes('alex')) setAgentStatus(prev => ({ ...prev, alex: true }));
-    });
 
     return () => {
       room.off(RoomEvent.DataReceived, onDataReceived);
       room.off(RoomEvent.TranscriptionReceived, handleTranscription);
-      room.off(RoomEvent.ParticipantConnected, handleConnected);
-      room.off(RoomEvent.ParticipantDisconnected, handleDisconnected);
     };
   }, [room, setThoughts, setTranscripts, setHalimaEmotions, setAlexEmotions, setNegotiationProgress]);
 
-  // Filtering for agents
-  const halima = participants.find(p => p.identity.includes("halima") || p.identity.includes("juma") || p.name?.toLowerCase().includes("halima"));
-  const alex = participants.find(p => p.identity.includes("alex") || p.name?.toLowerCase().includes("alex"));
+  // Track-based role mapping for agents (LiveKit agent IDs are randomized)
+  const tracks = useTracks(
+    [{ source: Track.Source.Microphone, withPlaceholder: false }],
+    { onlySubscribed: true }
+  );
+
+  const agentTracks = tracks.filter(t => t.participant.identity.startsWith("agent-"));
+  const [halimaTrack, alexTrack] = agentTracks;
+
+  const halimaOnline = Boolean(halimaTrack);
+  const alexOnline = Boolean(alexTrack);
+
+  const halimaSpeaking = Boolean(halimaTrack?.participant.isSpeaking);
+  const alexSpeaking = Boolean(alexTrack?.participant.isSpeaking);
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -354,24 +337,24 @@ function DashboardContent({
           <div className="flex gap-4 pr-6 border-r border-white/10 items-center">
             <div className="flex items-center gap-2">
               <div
-                className={`w-2 h-2 rounded-full transition-all duration-300 ${agentStatus.halima
-                  ? `bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.6)] ${halima?.isSpeaking ? "animate-pulse scale-150" : ""}`
-                  : "bg-red-500/30 grayscale"
+                className={`w-3 h-3 rounded-full transition-all duration-300 ${halimaOnline
+                  ? `bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.6)] ${halimaSpeaking ? "animate-pulse scale-150" : "animate-ping"}`
+                  : "bg-red-500"
                   }`}
               />
-              <span className={`text-[10px] font-mono uppercase transition-colors ${agentStatus.halima ? "text-gray-300" : "text-gray-600"}`}>
-                HALIMA: {agentStatus.halima ? (halima?.isSpeaking ? "SPEAKING" : "ACTIVE") : "OFFLINE"}
+              <span className={`text-[10px] font-mono uppercase transition-colors ${halimaOnline ? "text-gray-300" : "text-gray-600"}`}>
+                HALIMA: {halimaOnline ? (halimaSpeaking ? "SPEAKING" : "ACTIVE") : "OFFLINE"}
               </span>
             </div>
             <div className="flex items-center gap-2">
               <div
-                className={`w-2 h-2 rounded-full transition-all duration-300 ${agentStatus.alex
-                  ? `bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.6)] ${alex?.isSpeaking ? "animate-pulse scale-150" : ""}`
-                  : "bg-red-500/30 grayscale"
+                className={`w-3 h-3 rounded-full transition-all duration-300 ${alexOnline
+                  ? `bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.6)] ${alexSpeaking ? "animate-pulse scale-150" : "animate-ping"}`
+                  : "bg-red-500"
                   }`}
               />
-              <span className={`text-[10px] font-mono uppercase transition-colors ${agentStatus.alex ? "text-gray-300" : "text-gray-600"}`}>
-                ALEX: {agentStatus.alex ? (alex?.isSpeaking ? "SPEAKING" : "ACTIVE") : "OFFLINE"}
+              <span className={`text-[10px] font-mono uppercase transition-colors ${alexOnline ? "text-gray-300" : "text-gray-600"}`}>
+                ALEX: {alexOnline ? (alexSpeaking ? "SPEAKING" : "ACTIVE") : "OFFLINE"}
               </span>
             </div>
           </div>
@@ -422,9 +405,9 @@ function DashboardContent({
               {hasMounted && barHeights.orange.map((height: number, i: number) => (
                 <div
                   key={i}
-                  className={`w-1 bg-orange-500/40 rounded-full ${halima?.isSpeaking ? "animate-bounce" : ""}`}
+                  className={`w-1 bg-orange-500/40 rounded-full ${halimaSpeaking ? "animate-bounce" : ""}`}
                   style={{
-                    height: `${halima?.isSpeaking ? height : 10}%`,
+                    height: `${halimaSpeaking ? height : 10}%`,
                     animationDelay: `${i * 0.1}s`,
                     transition: "height 0.2s ease"
                   }}
@@ -443,9 +426,9 @@ function DashboardContent({
               {hasMounted && barHeights.blue.map((height: number, i: number) => (
                 <div
                   key={i}
-                  className={`w-1 bg-blue-500/40 rounded-full ${alex?.isSpeaking ? "animate-bounce" : ""}`}
+                  className={`w-1 bg-blue-500/40 rounded-full ${alexSpeaking ? "animate-bounce" : ""}`}
                   style={{
-                    height: `${alex?.isSpeaking ? height : 10}%`,
+                    height: `${alexSpeaking ? height : 10}%`,
                     animationDelay: `${i * 0.1}s`,
                     transition: "height 0.2s ease"
                   }}
