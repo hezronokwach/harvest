@@ -7,11 +7,16 @@ from livekit.agents import (
     JobProcess,
     cli,
     room_io,
+    function_tool,
 )
 from livekit.plugins import silero, noise_cancellation, deepgram, groq, hume
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit import rtc
+from typing import Annotated
+from pydantic import Field
 import logging
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -49,11 +54,37 @@ def negotiation_has_ended(text: str) -> bool:
         text_lower = text.lower()
         return any(k in text_lower for k in keywords)
 # -------------------------------------------------
-# Agent
+# Agent with Tool
 # -------------------------------------------------
 class NegotiationAgent(Agent):
-    def __init__(self, instructions: str):
+    def __init__(self, instructions: str, agent_name: str, room_participant):
         super().__init__(instructions=instructions)
+        self.agent_name = agent_name
+        self.room_participant = room_participant
+
+    @function_tool
+    async def propose_price(
+        self,
+        price: Annotated[
+            float,
+            Field(description="Proposed price per kilogram in USD")
+        ]
+    ):
+        """Tool for agents to propose a price during negotiation"""
+        agent_label = "Halima" if "Halima" in self.agent_name else "Alex"
+        logger.info(f"💰 [PRICE TOOL CALLED] {agent_label}: ${price:.2f}")
+
+        try:
+            await self.room_participant.publish_data(
+                json.dumps({
+                    "type": "price_update",
+                    "agent": agent_label,
+                    "price": round(price, 2),
+                }).encode()
+            )
+            logger.info(f"✅ [PUBLISHED] price_update for {agent_label}: ${price:.2f}")
+        except Exception as e:
+            logger.error(f"❌ Failed to publish price: {e}")
 
 # -------------------------------------------------
 # Server
@@ -92,7 +123,19 @@ async def entrypoint(ctx: JobContext):
     "- Reference your real costs: labor, fertilizer, transport, and storage "
     "- Never be rude, dismissive, or emotional "
     "- Keep responses concise (2–3 sentences maximum) "
-    "GOAL: Reach a fair deal between $1.10 and $1.20 per kilogram while maintaining mutual respect."
+    "GOAL: Reach a fair deal between $1.10 and $1.20 per kilogram while maintaining mutual respect.\n"
+    "\n"
+    "CRITICAL TOOL USAGE:\n"
+    "Whenever you propose or mention a specific price, you MUST immediately call the tool:\n"
+    "propose_price(price: float)\n"
+    "\n"
+    "Speak naturally to Alex, but always use the tool to record your price.\n"
+    "Example: Say 'I can offer one dollar twenty per kilogram' and call propose_price(1.20)"
+    "CRITICAL RULES:"
+    "- NEVER mention tools, functions, APIs, prices as calls, or internal actions."
+    "- NEVER say phrases like I am calling, I will now, price value equals, or similar."
+    "- Tools are silent internal actions and must not be spoken aloud."
+    "- Only speak natural conversational language intended for a human listener."
 )
     else:
        instructions = (
@@ -105,7 +148,19 @@ async def entrypoint(ctx: JobContext):
     "- Reference budget limits, logistics, and competitive suppliers "
     "- Show willingness to meet in the middle if quality and reliability are clear "
     "- Keep responses concise (2–3 sentences maximum) "
-    "GOAL: Reach a deal between $1.00 and $1.15 per kilogram while building a good long-term relationship."
+    "GOAL: Reach a deal between $1.00 and $1.15 per kilogram while building a good long-term relationship.\n"
+    "\n"
+    "CRITICAL TOOL USAGE:\n"
+    "Whenever you propose or mention a specific price, you MUST immediately call the tool:\n"
+    "propose_price(price: float)\n"
+    "\n"
+    "Speak naturally to Halima, but always use the tool to record your price.\n"
+    "Example: Say 'I can pay one dollar per kilogram' and call propose_price(1.00)"
+    "CRITICAL RULES:"
+    "- NEVER mention tools, functions, APIs, prices as calls, or internal actions."
+    "- NEVER say phrases like I am calling, I will now, price value equals, or similar."
+    "- Tools are silent internal actions and must not be spoken aloud."
+    "- Only speak natural conversational language intended for a human listener."
 )
 
     await ctx.connect()
@@ -113,18 +168,23 @@ async def entrypoint(ctx: JobContext):
     session = AgentSession(
         stt=deepgram.STT(),
         llm=groq.LLM(model="llama-3.3-70b-versatile"),
-      tts=hume.TTS(
-    voice=hume.VoiceByName(
-        name="Kora" if agent_name == "juma-agent" else "Big Dicky",
-        provider="HUME_AI",  # Use string literal instead
-    ),
-    instant_mode=True,
-),
-    vad=ctx.proc.userdata["vad"],
-)
+        tts=hume.TTS(
+            voice=hume.VoiceByName(
+                name="Kora" if agent_name == "juma-agent" else "Big Dicky",
+                provider="HUME_AI",
+            ),
+            instant_mode=True,
+        ),
+        vad=ctx.proc.userdata["vad"],
+        turn_detection=MultilingualModel(),  # ✅ CRITICAL: Enables speech_finished events
+    )
 
     await session.start(
-        agent=NegotiationAgent(instructions),
+        agent=NegotiationAgent(
+            instructions=instructions,
+            agent_name=agent_name,
+            room_participant=ctx.room.local_participant
+        ),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
@@ -164,24 +224,7 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.error(f"❌ Failed to publish round update: {e}")
 
-        # Extract and publish price
-        import re
-        price_match = re.search(r'\$?(\d+\.\d{2})', text)
-        if price_match:
-            price = float(price_match.group(1))
-            logger.info(f"💰 [PRICE FOUND] Halima mentioned: ${price}")
-            try:
-                payload = json.dumps({
-                    "type": "price_update",
-                    "agent": "Halima",
-                    "price": price
-                }).encode('utf-8')
-                await ctx.room.local_participant.publish_data(payload)
-                logger.info(f"✅ [PUBLISHED] price_update for Halima: ${price}")
-            except Exception as e:
-                logger.error(f"❌ Failed to publish price: {e}")
-        else:
-            logger.warning(f"⚠️ No price found in Halima's speech")
+        # Note: Price updates now handled by propose_price() tool call
 
         # ✅ Natural ending
         if negotiation_has_ended(text) or STATE["rounds"] >= STATE["max_rounds"]:
@@ -229,25 +272,7 @@ async def entrypoint(ctx: JobContext):
             await ctx.room.disconnect()
             return
 
-        # Extract and publish price
-        import re
-        import json
-        price_match = re.search(r'\$?(\d+\.\d{2})', text)
-        if price_match:
-            price = float(price_match.group(1))
-            logger.info(f"💰 [PRICE FOUND] Alex mentioned: ${price}")
-            try:
-                payload = json.dumps({
-                    "type": "price_update",
-                    "agent": "Alex",
-                    "price": price
-                }).encode('utf-8')
-                await ctx.room.local_participant.publish_data(payload)
-                logger.info(f"✅ [PUBLISHED] price_update for Alex: ${price}")
-            except Exception as e:
-                logger.error(f"❌ Failed to publish price: {e}")
-        else:
-            logger.warning(f"⚠️ No price found in Alex's speech")
+        # Note: Price updates now handled by propose_price() tool call
 
         await STATE["sessions"]["juma-agent"].generate_reply(
             instructions=f"Respond respectfully to Alex:\n{text}",
