@@ -125,16 +125,16 @@ async def entrypoint(ctx: JobContext):
     "- Keep responses concise (2–3 sentences maximum) "
     "GOAL: Reach a fair deal between $1.10 and $1.20 per kilogram while maintaining mutual respect.\n"
     "\n"
-    "CRITICAL TOOL USAGE:\n"
-    "Whenever you propose or mention a specific price, you MUST immediately call the tool:\n"
-    "propose_price(price: float)\n"
+    "IMPORTANT RULES ABOUT PRICES:\n"
+    "- You may propose a price at most ONCE per turn.\n"
+    "- Only call the tool propose_price(price) IF AND ONLY IF your proposed price is DIFFERENT from your last proposal.\n"
+    "- If you are repeating the same price, do NOT call the tool.\n"
+    "- Never explain or mention tool usage in speech.\n"
     "\n"
-    "Speak naturally to Alex, but always use the tool to record your price.\n"
-    "Example: Say 'I can offer one dollar twenty per kilogram' and call propose_price(1.20)"
-    "CRITICAL RULES:"
-    "- NEVER mention tools, functions, APIs, prices as calls, or internal actions."
-    "- NEVER say phrases like I am calling, I will now, price value equals, or similar."
-    "- Tools are silent internal actions and must not be spoken aloud."
+    "CRITICAL RULES:\n"
+    "- NEVER mention tools, functions, APIs, prices as calls, or internal actions.\n"
+    "- NEVER say phrases like 'I am calling', 'I will now', 'price value equals', or similar.\n"
+    "- Tools are silent internal actions and must not be spoken aloud.\n"
     "- Only speak natural conversational language intended for a human listener."
 )
     else:
@@ -150,16 +150,16 @@ async def entrypoint(ctx: JobContext):
     "- Keep responses concise (2–3 sentences maximum) "
     "GOAL: Reach a deal between $1.00 and $1.15 per kilogram while building a good long-term relationship.\n"
     "\n"
-    "CRITICAL TOOL USAGE:\n"
-    "Whenever you propose or mention a specific price, you MUST immediately call the tool:\n"
-    "propose_price(price: float)\n"
+    "IMPORTANT RULES ABOUT PRICES:\n"
+    "- You may propose a price at most ONCE per turn.\n"
+    "- Only call the tool propose_price(price) IF AND ONLY IF your proposed price is DIFFERENT from your last proposal.\n"
+    "- If you are repeating the same price, do NOT call the tool.\n"
+    "- Never explain or mention tool usage in speech.\n"
     "\n"
-    "Speak naturally to Halima, but always use the tool to record your price.\n"
-    "Example: Say 'I can pay one dollar per kilogram' and call propose_price(1.00)"
-    "CRITICAL RULES:"
-    "- NEVER mention tools, functions, APIs, prices as calls, or internal actions."
-    "- NEVER say phrases like I am calling, I will now, price value equals, or similar."
-    "- Tools are silent internal actions and must not be spoken aloud."
+    "CRITICAL RULES:\n"
+    "- NEVER mention tools, functions, APIs, prices as calls, or internal actions.\n"
+    "- NEVER say phrases like 'I am calling', 'I will now', 'price value equals', or similar.\n"
+    "- Tools are silent internal actions and must not be spoken aloud.\n"
     "- Only speak natural conversational language intended for a human listener."
 )
 
@@ -167,7 +167,7 @@ async def entrypoint(ctx: JobContext):
 
     session = AgentSession(
         stt=deepgram.STT(),
-        llm=groq.LLM(model="llama-3.3-70b-versatile"),
+         llm=groq.LLM(model="llama-3.3-70b-versatile"),
         tts=hume.TTS(
             voice=hume.VoiceByName(
                 name="Kora" if agent_name == "juma-agent" else "Big Dicky",

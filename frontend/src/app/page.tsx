@@ -41,7 +41,12 @@ export default function Home() {
   const [halimaEmotions, setHalimaEmotions] = useState({ confidence: 0.85, stress: 0.12, urgency: 0.45 });
   const [alexEmotions, setAlexEmotions] = useState({ confidence: 0.62, stress: 0.78, urgency: 0.92 });
 
-  const [negotiation, setNegotiation] = useState({ ask: 1.25, bid: 0.95, target: 1.15 });
+  const [negotiation, setNegotiation] = useState<Negotiation>({
+    ask: 1.25,
+    bid: 0.95,
+    target: 1.15,
+  });
+  const [dealReached, setDealReached] = useState(false);
   const [negotiationProgress, setNegotiationProgress] = useState(0);
   const [thoughts, setThoughts] = useState<Array<{ id: string; agent: string; text: string; type: "strategy" | "insight" | "warning" }>>([]);
   const [transcripts, setTranscripts] = useState<Array<{ id: string; agent: string; text: string }>>([]);
@@ -112,6 +117,8 @@ export default function Home() {
           <DashboardContent
             negotiation={negotiation}
             setNegotiation={setNegotiation}
+            dealReached={dealReached}
+            setDealReached={setDealReached}
             negotiationProgress={negotiationProgress}
             setNegotiationProgress={setNegotiationProgress}
             halimaEmotions={halimaEmotions}
@@ -135,6 +142,8 @@ export default function Home() {
 function DashboardContent({
   negotiation,
   setNegotiation,
+  dealReached,
+  setDealReached,
   negotiationProgress,
   setNegotiationProgress,
   halimaEmotions,
@@ -150,6 +159,8 @@ function DashboardContent({
 }: {
   negotiation: Negotiation;
   setNegotiation: React.Dispatch<React.SetStateAction<Negotiation>>;
+  dealReached: boolean;
+  setDealReached: React.Dispatch<React.SetStateAction<boolean>>;
   negotiationProgress: number;
   setNegotiationProgress: React.Dispatch<React.SetStateAction<number>>;
   halimaEmotions: Emotions;
@@ -215,15 +226,19 @@ function DashboardContent({
         } else if (data.type === "round_update") {
           const progress = (data.round / 8) * 100;
           setNegotiationProgress(progress);
-          console.log("🔄 [ROUND UPDATE]", data.round, `Progress: ${progress}%`);
         } else if (data.type === "price_update") {
-          console.log("💰 [PRICE UPDATE RECEIVED]", data.agent, "$" + data.price);
           setNegotiation((prev: Negotiation) => ({
             ...prev,
             ask: data.agent === "Halima" ? data.price : prev.ask,
             bid: data.agent === "Alex" ? data.price : prev.bid,
           }));
-          console.log("✅ [PRICE STATE UPDATED]", data.agent, "$" + data.price);
+        } else if (data.type === "deal_reached") {
+          setNegotiation({
+            ask: data.price,
+            bid: data.price,
+            target: data.price,
+          });
+          setDealReached(true);
         }
       } catch (e) {
         console.error("Failed to parse data message:", e);
@@ -339,15 +354,11 @@ function DashboardContent({
 
       <div className="grid grid-cols-12 gap-8">
         <div className="col-span-8 space-y-8">
-          {/* Debug Display */}
-          <div className="px-4 py-2 bg-green-500/10 border border-green-500/20 rounded text-xs font-mono">
-            💰 Live Prices: Ask: ${negotiation.ask.toFixed(2)} | Bid: ${negotiation.bid.toFixed(2)} | Spread: ${(negotiation.ask - negotiation.bid).toFixed(2)}
-          </div>
-
           <PriceGapSlider
             ask={negotiation.ask}
             bid={negotiation.bid}
             target={negotiation.target}
+            dealReached={dealReached}
           />
 
           <div className="grid grid-cols-2 gap-8">
