@@ -10,8 +10,9 @@ interface PriceGapSliderProps {
 
 export default function PriceGapSlider({ ask, bid, target }: PriceGapSliderProps) {
     // Calculate relative positions for a slider between $0.80 and $1.50
-    const min = 0.8;
-    const max = 1.5;
+    const padding = 0.08;
+    const min = Math.min(bid, ask, target) - padding;
+    const max = Math.max(bid, ask, target) + padding;
     const range = max - min;
 
     const getPos = (val: number) => ((val - min) / range) * 100;
@@ -34,8 +35,11 @@ export default function PriceGapSlider({ ask, bid, target }: PriceGapSliderProps
             <div className="relative h-4 w-full bg-gray-800 rounded-full mt-8">
                 {/* The Bid (Buyer) */}
                 <div
-                    className="absolute top-1/2 -translate-y-1/2 flex flex-col items-center transition-all duration-300"
-                    style={{ left: `${getPos(bid)}%` }}
+                    className="absolute top-1/2 -translate-y-1/2 h-1 rounded-full bg-gradient-to-r from-blue-500 to-orange-500 transition-all duration-300"
+                    style={{
+                        left: `${getPos(Math.min(bid, ask))}%`,
+                        width: `${Math.abs(getPos(ask) - getPos(bid))}%`,
+                    }}
                 >
                     <div className="w-4 h-4 rounded-full bg-blue-500 ring-4 ring-blue-500/20 shadow-[0_0_15px_rgba(59,130,246,0.5)]" />
                     <span className="mt-2 text-[10px] font-mono text-blue-400 leading-none">BID ${bid.toFixed(2)}</span>

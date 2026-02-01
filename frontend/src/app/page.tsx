@@ -41,7 +41,7 @@ export default function Home() {
   const [halimaEmotions, setHalimaEmotions] = useState({ confidence: 0.85, stress: 0.12, urgency: 0.45 });
   const [alexEmotions, setAlexEmotions] = useState({ confidence: 0.62, stress: 0.78, urgency: 0.92 });
 
-  const [negotiation] = useState({ ask: 1.25, bid: 0.95, target: 1.15 });
+  const [negotiation, setNegotiation] = useState({ ask: 1.25, bid: 0.95, target: 1.15 });
   const [negotiationProgress, setNegotiationProgress] = useState(0);
   const [thoughts, setThoughts] = useState<Array<{ id: string; agent: string; text: string; type: "strategy" | "insight" | "warning" }>>([]);
   const [transcripts, setTranscripts] = useState<Array<{ id: string; agent: string; text: string }>>([]);
@@ -111,6 +111,7 @@ export default function Home() {
         >
           <DashboardContent
             negotiation={negotiation}
+            setNegotiation={setNegotiation}
             negotiationProgress={negotiationProgress}
             setNegotiationProgress={setNegotiationProgress}
             halimaEmotions={halimaEmotions}
@@ -133,6 +134,7 @@ export default function Home() {
 
 function DashboardContent({
   negotiation,
+  setNegotiation,
   negotiationProgress,
   setNegotiationProgress,
   halimaEmotions,
@@ -147,6 +149,7 @@ function DashboardContent({
   hasMounted
 }: {
   negotiation: Negotiation;
+  setNegotiation: React.Dispatch<React.SetStateAction<Negotiation>>;
   negotiationProgress: number;
   setNegotiationProgress: React.Dispatch<React.SetStateAction<number>>;
   halimaEmotions: Emotions;
@@ -171,8 +174,12 @@ function DashboardContent({
       const decoder = new TextDecoder();
       try {
         const data = JSON.parse(decoder.decode(payload));
-        const agentName = participant?.name ||
-          (participant?.identity.includes("halima") || participant?.identity.includes("juma") ? "Halima" : "Alex");
+
+        // For price_update, trust the agent field from backend
+        // For other messages, derive from participant
+        const agentName = data.type === "price_update"
+          ? data.agent
+          : (participant?.name || (participant?.identity.includes("halima") || participant?.identity.includes("juma") ? "Halima" : "Alex"));
 
         if (data.type === "thought") {
           const id = `${agentName}-${crypto.randomUUID()}`;
@@ -208,23 +215,32 @@ function DashboardContent({
         } else if (data.type === "round_update") {
           const progress = (data.round / 8) * 100;
           setNegotiationProgress(progress);
+          console.log("🔄 [ROUND UPDATE]", data.round, `Progress: ${progress}%`);
+        } else if (data.type === "price_update") {
+          console.log("💰 [PRICE UPDATE RECEIVED]", data.agent, "$" + data.price);
+          setNegotiation((prev: Negotiation) => ({
+            ...prev,
+            ask: data.agent === "Halima" ? data.price : prev.ask,
+            bid: data.agent === "Alex" ? data.price : prev.bid,
+          }));
+          console.log("✅ [PRICE STATE UPDATED]", data.agent, "$" + data.price);
         }
       } catch (e) {
         console.error("Failed to parse data message:", e);
       }
     };
 
-    const handleTranscription = (segments: TranscriptionSegment[], participant?: Participant) => {
-      segments.forEach(segment => {
-        if (segment.final && participant) {
-          const agentName = participant.identity.includes('halima') || participant.identity.includes('juma') ? 'Halima' : 'Alex';
-          setTranscripts(prev => [
-            { id: crypto.randomUUID(), agent: agentName, text: segment.text },
-            ...prev.slice(0, 19)
-          ]);
-        }
-      });
-    };
+    // const handleTranscription = (segments: TranscriptionSegment[], participant?: Participant) => {
+    //   segments.forEach(segment => {
+    //     if (segment.final && participant) {
+    //       const agentName = participant.identity.includes('halima') || participant.identity.includes('juma') ? 'Halima' : 'Alex';
+    //       setTranscripts(prev => [
+    //         { id: crypto.randomUUID(), agent: agentName, text: segment.text },
+    //         ...prev.slice(0, 19)
+    //       ]);
+    //     }
+    //   });
+    // };
 
     const handleConnected = (participant: RemoteParticipant) => {
       if (participant.identity.includes('halima') || participant.identity.includes('juma')) {
@@ -243,7 +259,7 @@ function DashboardContent({
     };
 
     room.on(RoomEvent.DataReceived, onDataReceived);
-    room.on(RoomEvent.TranscriptionReceived, handleTranscription);
+    // room.on(RoomEvent.TranscriptionReceived, handleTranscription);
     room.on(RoomEvent.ParticipantConnected, handleConnected);
     room.on(RoomEvent.ParticipantDisconnected, handleDisconnected);
 
@@ -255,7 +271,7 @@ function DashboardContent({
 
     return () => {
       room.off(RoomEvent.DataReceived, onDataReceived);
-      room.off(RoomEvent.TranscriptionReceived, handleTranscription);
+      // room.off(RoomEvent.TranscriptionReceived, handleTranscription);
       room.off(RoomEvent.ParticipantConnected, handleConnected);
       room.off(RoomEvent.ParticipantDisconnected, handleDisconnected);
     };
@@ -323,6 +339,11 @@ function DashboardContent({
 
       <div className="grid grid-cols-12 gap-8">
         <div className="col-span-8 space-y-8">
+          {/* Debug Display */}
+          <div className="px-4 py-2 bg-green-500/10 border border-green-500/20 rounded text-xs font-mono">
+            💰 Live Prices: Ask: ${negotiation.ask.toFixed(2)} | Bid: ${negotiation.bid.toFixed(2)} | Spread: ${(negotiation.ask - negotiation.bid).toFixed(2)}
+          </div>
+
           <PriceGapSlider
             ask={negotiation.ask}
             bid={negotiation.bid}
@@ -394,7 +415,7 @@ function DashboardContent({
         <div className="col-span-4 space-y-8">
           <InnerMonologue thoughts={thoughts} />
 
-          <Transcript transcripts={transcripts} />
+          {/* <Transcript transcripts={transcripts} /> */}
 
           <div className="p-6 rounded-xl bg-gradient-to-br from-orange-500 to-orange-600 text-black shadow-lg shadow-orange-500/20 active:scale-[0.98] transition-all">
             <h4 className="text-[10px] font-black uppercase mb-1 opacity-60 tracking-widest">Current Strategy Directive</h4>

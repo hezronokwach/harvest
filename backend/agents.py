@@ -147,19 +147,41 @@ async def entrypoint(ctx: JobContext):
     
 
     async def juma_after_speech(text: str):
+        logger.info(f"🎤 [SPEECH_FINISHED EVENT] Halima speech handler called!")
         STATE["rounds"] += 1
-        logger.info(f"[ROUND {STATE['rounds']}] Halima finished")
+        logger.info(f"🔄 [ROUND {STATE['rounds']}] Halima finished speaking")
+        logger.info(f"📝 [SPEECH TEXT] {text}")
 
         # Notify frontend of round update
         try:
-            await ctx.room.local_participant.publish_data(
-                json.dumps({
-                    "type": "round_update",
-                    "round": STATE["rounds"]
-                })
-            )
+            import json
+            payload = json.dumps({
+                "type": "round_update",
+                "round": STATE["rounds"]
+            }).encode('utf-8')
+            await ctx.room.local_participant.publish_data(payload)
+            logger.info(f"✅ Published round_update: Round {STATE['rounds']}")
         except Exception as e:
-            logger.warning(f"Failed to publish round update: {e}")
+            logger.error(f"❌ Failed to publish round update: {e}")
+
+        # Extract and publish price
+        import re
+        price_match = re.search(r'\$?(\d+\.\d{2})', text)
+        if price_match:
+            price = float(price_match.group(1))
+            logger.info(f"💰 [PRICE FOUND] Halima mentioned: ${price}")
+            try:
+                payload = json.dumps({
+                    "type": "price_update",
+                    "agent": "Halima",
+                    "price": price
+                }).encode('utf-8')
+                await ctx.room.local_participant.publish_data(payload)
+                logger.info(f"✅ [PUBLISHED] price_update for Halima: ${price}")
+            except Exception as e:
+                logger.error(f"❌ Failed to publish price: {e}")
+        else:
+            logger.warning(f"⚠️ No price found in Halima's speech")
 
         # ✅ Natural ending
         if negotiation_has_ended(text) or STATE["rounds"] >= STATE["max_rounds"]:
@@ -191,9 +213,10 @@ async def entrypoint(ctx: JobContext):
         )
 
     async def alex_after_speech(text: str):
+        logger.info(f"🔵 [ALEX SPEECH] {text}")
+        
         if negotiation_has_ended(text):
             logger.info("Deal reached! Ending negotiation...")
-            # Wait a moment then close
             await asyncio.sleep(2)
             
             # Close both sessions
@@ -203,9 +226,28 @@ async def entrypoint(ctx: JobContext):
                 except Exception as e:
                     logger.warning(f"Error closing session: {e}")
             
-            # Disconnect from room
             await ctx.room.disconnect()
             return
+
+        # Extract and publish price
+        import re
+        import json
+        price_match = re.search(r'\$?(\d+\.\d{2})', text)
+        if price_match:
+            price = float(price_match.group(1))
+            logger.info(f"💰 [PRICE FOUND] Alex mentioned: ${price}")
+            try:
+                payload = json.dumps({
+                    "type": "price_update",
+                    "agent": "Alex",
+                    "price": price
+                }).encode('utf-8')
+                await ctx.room.local_participant.publish_data(payload)
+                logger.info(f"✅ [PUBLISHED] price_update for Alex: ${price}")
+            except Exception as e:
+                logger.error(f"❌ Failed to publish price: {e}")
+        else:
+            logger.warning(f"⚠️ No price found in Alex's speech")
 
         await STATE["sessions"]["juma-agent"].generate_reply(
             instructions=f"Respond respectfully to Alex:\n{text}",
@@ -214,11 +256,13 @@ async def entrypoint(ctx: JobContext):
 
     # Attach handlers
     if agent_name == "juma-agent":
+        logger.info("🎤 Registering speech_finished handler for Halima (juma-agent)")
         session.on(
             "speech_finished",
             lambda text: asyncio.create_task(juma_after_speech(text))
         )
     else:
+        logger.info("🎤 Registering speech_finished handler for Alex (alex-agent)")
         session.on(
             "speech_finished",
             lambda text: asyncio.create_task(alex_after_speech(text))
@@ -227,14 +271,22 @@ async def entrypoint(ctx: JobContext):
     # -------------------------------------------------
     # START CONVERSATION
     # -------------------------------------------------
+    logger.info(f"🚀 Checking if {agent_name} should start conversation...")
     if agent_name == "juma-agent":
-        await session.generate_reply(
-        instructions=(
-            "Greet Alex politely and state your starting price, "
-            "while expressing openness to a fair discussion."
-        ),
-        allow_interruptions=False,
-    )
+        logger.info("✅ Halima (juma-agent) will start the conversation")
+        try:
+            await session.generate_reply(
+                instructions=(
+                    "Greet Alex politely and state your starting price, "
+                    "while expressing openness to a fair discussion."
+                ),
+                allow_interruptions=False,
+            )
+            logger.info("📤 Conversation starter sent to Halima")
+        except Exception as e:
+            logger.error(f"❌ Failed to generate reply: {e}")
+    else:
+        logger.info(f"⏸️ {agent_name} waiting for Halima to start")
 
     # -------------------------------------------------
     # Keep alive
