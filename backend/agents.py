@@ -8,6 +8,7 @@ from livekit.agents import (
     cli,
     room_io,
     function_tool,
+    utils,
 )
 from livekit.agents import inference
 from livekit.plugins import silero, noise_cancellation, deepgram, groq, hume, openai
@@ -33,8 +34,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("negotiation-agent")
 
 # -------------------------------------------------
-# Shared state
-# -------------------------------------------------
 STATE = {
     "rounds": 0,
     "turns": 0,
@@ -42,6 +41,14 @@ STATE = {
     "sessions": {},
     "shutting_down": False,
     "halima_speaking": False,
+    "offers": {
+        "halima": None,
+        "alex": None,
+    },
+    "concessions": {
+        "halima": set(),
+        "alex": set(),
+    },
 }
 
 # -------------------------------------------------
@@ -52,26 +59,58 @@ class NegotiationAgent(Agent):
         super().__init__(instructions=instructions)
         self.agent_name = agent_name
         self.room_participant = room_participant
+        self._spoken_buffer = []
+
+    async def transcription_task(self):
+        """Official hook to capture agent's own speech from the session"""
+        while self.session is None:
+            await asyncio.sleep(0.05)
+            
+        async for segment in self.session.transcriptions():
+            if hasattr(segment, "text"):
+                self._spoken_buffer.append(segment.text)
+            else:
+                self._spoken_buffer.append(str(segment))
+
+    def consume_spoken_text(self) -> str:
+        """Clear the buffer and return the concatenated speech"""
+        text = " ".join(self._spoken_buffer).strip()
+        self._spoken_buffer.clear()
+        return text
 
     @function_tool
-    async def propose_price(
+    async def propose_offer(
         self,
-        price: Annotated[float, Field(description="Proposed price per kilogram in USD")],
+        price: Annotated[float, Field(description="USD per kg")],
+        delivery_included: Annotated[bool, Field(description="Whether delivery is included")],
+        transport_paid_by: Annotated[str, Field(description="seller or buyer")],
+        payment_terms: Annotated[str, Field(description="cash, 7_days, or 14_days")],
     ) -> None:
-        """Tool for agents to propose a price during negotiation"""
+        """Tool for agents to propose a concrete multi-lever offer"""
         agent_label = "Halima" if "juma" in self.agent_name.lower() else "Alex"
-        logger.info(f"💰 [PRICE TOOL CALLED] {agent_label}: ${price:.2f}")
+        
+        offer = {
+            "price": round(price, 2),
+            "delivery_included": delivery_included,
+            "transport_paid_by": transport_paid_by,
+            "payment_terms": payment_terms,
+        }
+
+        STATE["offers"][agent_label.lower()] = offer
+        STATE["concessions"][agent_label.lower()].update(offer.keys())
+
+        logger.info(f"📦 [OFFER] {agent_label}: {offer}")
 
         try:
             await self.room_participant.publish_data(
                 json.dumps({
-                    "type": "price_update",
+                    "type": "offer_update",
                     "agent": agent_label,
-                    "price": round(price, 2),
+                    "offer": offer,
                 }).encode()
             )
         except Exception as e:
-            logger.error(f"❌ Failed to publish price: {e}")
+            logger.error(f"❌ Failed to publish offer: {e}")
 
 # -------------------------------------------------
 # Server
@@ -98,9 +137,19 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"Starting {agent_name}")
 
     if agent_name == "juma-agent":
-        instructions = "You are Halima, a Kenyan farmer. Negotiate $1.25/kg. Be warm and firm."
+        instructions = """You are Halima, a Kenyan farmer selling bulk maize.
+Goal: Maximize total value.
+Negotiate using: price per kg (target $1.25), delivery inclusion, transport responsibility, and payment timing.
+Strategy: Concede occasionally but not repeatedly on the same dimension. 
+Be warm and practical. Explain constraints (fertilizer, labor, cash flow) naturally without repeating the same reason twice.
+If you are starting the negotiation, you must make an initial concrete offer.
+Only call propose_offer when making a concrete counter-offer. You may speak without making an offer."""
     else:
-        instructions = "You are Alex, a commodity buyer. Target $0.90-$1.05/kg. Be professional."
+        instructions = """You are Alex, a professional commodity buyer.
+Goal: Minimize total landed cost and risk.
+Strategy: Evaluate offers holistically. You may accept higher prices if delivery or payment terms improve.
+Be concise and analytical. reject and explain why, or counter with a different bundle.
+Only call propose_offer when making a concrete counter-offer. You may speak without making an offer."""
 
     await ctx.connect()
 
@@ -131,6 +180,8 @@ async def entrypoint(ctx: JobContext):
             close_on_disconnect=False
         ),
     )
+    
+    asyncio.create_task(agent.transcription_task())
 
     STATE["sessions"][agent_name] = {
         "session": session,
@@ -186,21 +237,28 @@ async def entrypoint(ctx: JobContext):
                             logger.warning("⛔ Halima task cancelled: shutting down")
                             return
 
-                        # Generate reply and get a SpeechHandle (returns when text is ready)
-                        handle = await session.generate_reply(instructions=data["instructions"], allow_interruptions=False)
+                        # Generate reply and get a SpeechHandle
+                        handle = await session.generate_reply(
+                            instructions=data["instructions"],
+                            allow_interruptions=False,
+                        )
                         
-                        # ✅ Text is ready immediately on the handle
-                        halima_text = handle.text if hasattr(handle, "text") else data["instructions"]
 
-                        # Safety guard: prevent ACK if master loop is already satisfied or closing
-                        if STATE.get("shutting_down"): return
-                        if STATE.get("halima_done_future") and STATE["halima_done_future"].done():
-                            logger.warning("⚠️ Halima turn already acknowledged. Skipping duplicate ACK.")
-                            return
+                        # Robust retry loop for transcription lag
+                        halima_text = ""
+                        for _ in range(20):   # up to ~1 second
+                            halima_text = agent.consume_spoken_text()
+                            if halima_text:
+                                break
+                            await asyncio.sleep(0.05)
+
+                        if not halima_text:
+                            halima_text = "Let me outline an initial offer so we can move forward."
 
                         # Signal completion and SHARE TEXT to bridge context
                         await ctx.room.local_participant.publish_data(json.dumps({
                             "type": "HALIMA_DONE",
+                            "speaker": "Halima",
                             "text": halima_text
                         }).encode())
                         logger.info(f"📤 Halima sent HALIMA_DONE with text: {halima_text}")
@@ -255,7 +313,18 @@ async def entrypoint(ctx: JobContext):
 
             # 1. Trigger Halima to speak
             last_alex = STATE.get("last_alex_text", "Introductions phase.")
-            instr = f"Greet Alex and propose $1.25/kg." if STATE["rounds"] == 0 else f"Respond to Alex. He said: '{last_alex}'"
+            
+            instr = f"""
+            Context:
+            Alex last said: "{last_alex}"
+
+            Last offers:
+            Halima: {STATE["offers"]["halima"]}
+            Alex: {STATE["offers"]["alex"]}
+
+            If no offer has been made yet, make a concrete opening offer.
+            Otherwise, continue the negotiation naturally.
+            """
             
             await ctx.room.local_participant.publish_data(json.dumps({
                 "type": "HALIMA_TURN",
@@ -282,16 +351,38 @@ async def entrypoint(ctx: JobContext):
             if STATE.get("shutting_down"): break
             logger.info("🎤 Alex starts speaking turn...")
             
-            alex_instr = f"Respond to Halima. she said: '{halima_text}'"
-            result = await session.generate_reply(instructions=alex_instr, allow_interruptions=False)
-            
-            # ✅ Extract fixed text from result
-            alex_text = result.text if hasattr(result, "text") else "I understand your point."
+            alex_instr = f"""
+            Context:
+            Halima last said: "{halima_text}"
+
+            Last offers:
+            Halima: {STATE["offers"]["halima"]}
+            Alex: {STATE["offers"]["alex"]}
+
+            Continue the negotiation naturally.
+            """
+            handle = await session.generate_reply(
+                instructions=alex_instr,
+                allow_interruptions=False,
+            )
+
+            # Robust retry loop for transcription lag
+            alex_text = ""
+            for _ in range(20):
+                alex_text = agent.consume_spoken_text()
+                if alex_text:
+                    break
+                await asyncio.sleep(0.05)
+
+            if not alex_text:
+                alex_text = "I appreciate your offer. Let me review it."
+                
             STATE["last_alex_text"] = alex_text
 
             # Broadcast Alex's text so Halima can "hear" it
             await ctx.room.local_participant.publish_data(json.dumps({
                 "type": "ALEX_SPEECH",
+                "speaker": "Alex",
                 "text": alex_text
             }).encode())
             

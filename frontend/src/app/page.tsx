@@ -61,6 +61,7 @@ export default function Home() {
   const [negotiationProgress, setNegotiationProgress] = useState(0);
   const [thoughts, setThoughts] = useState<Array<{ id: string; agent: string; text: string; type: "strategy" | "insight" | "warning" }>>([]);
   const [transcripts, setTranscripts] = useState<Array<{ id: string; agent: string; text: string }>>([]);
+  const [offers, setOffers] = useState<{ halima: any, alex: any }>({ halima: null, alex: null });
 
   useEffect(() => {
     const timer = setTimeout(() => setHasMounted(true), 0);
@@ -140,6 +141,8 @@ export default function Home() {
             transcripts={transcripts}
             setTranscripts={setTranscripts}
             hasMounted={hasMounted}
+            offers={offers}
+            setOffers={setOffers}
           />
           <RoomAudioRenderer />
         </LiveKitRoom>
@@ -162,7 +165,9 @@ function DashboardContent({
   setThoughts,
   transcripts,
   setTranscripts,
-  hasMounted
+  hasMounted,
+  offers,
+  setOffers
 }: {
   negotiation: Negotiation;
   setNegotiation: React.Dispatch<React.SetStateAction<Negotiation>>;
@@ -178,6 +183,8 @@ function DashboardContent({
   transcripts: Array<{ id: string; agent: string; text: string }>;
   setTranscripts: React.Dispatch<React.SetStateAction<Array<{ id: string; agent: string; text: string }>>>;
   hasMounted: boolean;
+  offers: { halima: any, alex: any };
+  setOffers: React.Dispatch<React.SetStateAction<{ halima: any, alex: any }>>;
 }) {
   const room = useRoomContext();
 
@@ -235,6 +242,17 @@ function DashboardContent({
           ask: data.agent === "Halima" ? data.price : prev.ask,
           bid: data.agent === "Alex" ? data.price : prev.bid,
         }));
+      } else if (data.type === "offer_update") {
+        setOffers((prev) => ({
+          ...prev,
+          [data.agent.toLowerCase()]: data.offer
+        }));
+        // Update price gap slider based on the new offer's price
+        setNegotiation((prev: Negotiation) => ({
+          ...prev,
+          ask: data.agent === "Halima" ? data.offer.price : prev.ask,
+          bid: data.agent === "Alex" ? data.offer.price : prev.bid,
+        }));
       } else if (data.type === "deal_reached") {
         setNegotiation({
           ask: data.price,
@@ -242,6 +260,17 @@ function DashboardContent({
           target: data.price,
         });
         setDealReached(true);
+      } else if (data.type === "SPEECH" || data.type === "HALIMA_DONE" || data.type === "ALEX_SPEECH") {
+        if (data.text) {
+          const speaker = data.speaker || agentName;
+          setTranscripts(prev => {
+            const next = [
+              ...prev,
+              { id: crypto.randomUUID(), agent: speaker, text: data.text }
+            ];
+            return next.length > 50 ? next.slice(-50) : next;
+          });
+        }
       }
     };
 
@@ -383,6 +412,8 @@ function DashboardContent({
             maxRounds={timeline.maxRounds}
           />
 
+          <OfferDisplay offers={offers} />
+
           <div className="h-48 rounded-xl bg-gradient-to-t from-orange-500/5 to-transparent border border-white/5 flex flex-col items-center justify-center relative overflow-hidden">
             <div className="absolute top-4 left-4 flex items-center gap-3">
               <div className="text-[8px] font-bold text-orange-500 uppercase tracking-[0.3em]">Negotiation Waveform</div>
@@ -478,6 +509,51 @@ function NegotiationTimeline({ turn, round, maxRounds }: { turn: number; round: 
           <p className="text-[8px] font-mono text-gray-600 uppercase">Rounds Complete</p>
           <p className="text-xl font-black tracking-tighter text-white">
             {round} <span className="text-xs text-gray-600">/ {maxRounds}</span>
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OfferDisplay({ offers }: { offers: { halima: any, alex: any } }) {
+  return (
+    <div className="grid grid-cols-2 gap-4">
+      <AgentOffer label="Halima (Seller)" offer={offers.halima} color="orange" />
+      <AgentOffer label="Alex (Buyer)" offer={offers.alex} color="blue" />
+    </div>
+  );
+}
+
+function AgentOffer({ label, offer, color }: { label: string, offer: any, color: "orange" | "blue" }) {
+  if (!offer) return (
+    <div className="bg-white/5 border border-white/10 rounded-xl p-4 opacity-50">
+      <h4 className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">{label}</h4>
+      <p className="text-xs text-gray-600 italic">Waiting for strategy...</p>
+    </div>
+  );
+
+  return (
+    <div className={`bg-white/5 border ${color === "orange" ? "border-orange-500/20 hover:border-orange-500/40" : "border-blue-500/20 hover:border-blue-500/40"} rounded-xl p-4 relative overflow-hidden group transition-all`}>
+      <div className={`absolute top-0 right-0 w-16 h-16 ${color === "orange" ? "bg-orange-500/5" : "bg-blue-500/5"} -mr-8 -mt-8 rounded-full blur-xl group-hover:scale-150 transition-transform`} />
+      <h4 className={`text-[10px] font-bold ${color === "orange" ? "text-orange-500" : "text-blue-500"} uppercase tracking-widest mb-3`}>{label}</h4>
+      <div className="grid grid-cols-2 gap-y-3 gap-x-2">
+        <div className="space-y-0.5">
+          <p className="text-[8px] text-gray-500 uppercase font-mono">Price/KG</p>
+          <p className="text-lg font-black tracking-tighter text-white">${offer.price.toFixed(2)}</p>
+        </div>
+        <div className="space-y-0.5">
+          <p className="text-[8px] text-gray-500 uppercase font-mono">Payment</p>
+          <p className="text-sm font-bold text-gray-300">{offer.payment_terms.replace("_", " ")}</p>
+        </div>
+        <div className="space-y-0.5">
+          <p className="text-[8px] text-gray-500 uppercase font-mono">Transport</p>
+          <p className="text-sm font-bold text-gray-300 capitalize">{offer.transport_paid_by}</p>
+        </div>
+        <div className="space-y-0.5">
+          <p className="text-[8px] text-gray-500 uppercase font-mono">Delivery</p>
+          <p className={`text-sm font-bold ${offer.delivery_included ? "text-green-500" : "text-gray-400"}`}>
+            {offer.delivery_included ? "INCLUDED" : "EXCLUDED"}
           </p>
         </div>
       </div>
