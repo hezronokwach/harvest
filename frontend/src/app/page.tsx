@@ -32,6 +32,20 @@ interface Negotiation {
   target: number;
 }
 
+// Suppress non-critical LiveKit track warnings in development
+if (typeof window !== "undefined") {
+  const originalConsoleError = console.error;
+  console.error = (...args) => {
+    if (
+      typeof args[0] === "string" &&
+      args[0].includes("Tried to add a track for a participant")
+    ) {
+      return;
+    }
+    originalConsoleError(...args);
+  };
+}
+
 export default function Home() {
   const [lkToken, setLkToken] = useState<string | null>(null);
   const [hasMounted, setHasMounted] = useState(false);
