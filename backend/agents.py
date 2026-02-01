@@ -11,7 +11,6 @@ from livekit.agents import (
 )
 from livekit.agents import inference
 from livekit.plugins import silero, noise_cancellation, deepgram, groq, hume, openai
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit import rtc
 from typing import Annotated
 from pydantic import Field
@@ -38,22 +37,12 @@ logger = logging.getLogger("negotiation-agent")
 # -------------------------------------------------
 STATE = {
     "rounds": 0,
+    "turns": 0,
     "max_rounds": 8,
     "sessions": {},
+    "shutting_down": False,
 }
 
-def negotiation_has_ended(text: str) -> bool:
-        keywords = [
-            "deal accepted",
-            "we have a deal",
-            "agreed price",
-            "let's proceed",
-            "no deal",
-            "cannot agree",
-            "walk away"
-        ]
-        text_lower = text.lower()
-        return any(k in text_lower for k in keywords)
 # -------------------------------------------------
 # Agent with Tool
 # -------------------------------------------------
@@ -66,13 +55,10 @@ class NegotiationAgent(Agent):
     @function_tool
     async def propose_price(
         self,
-        price: Annotated[
-            float,
-            Field(description="Proposed price per kilogram in USD")
-        ],
+        price: Annotated[float, Field(description="Proposed price per kilogram in USD")],
     ) -> None:
         """Tool for agents to propose a price during negotiation"""
-        agent_label = "Halima" if "Halima" in self.agent_name else "Alex"
+        agent_label = "Halima" if "juma" in self.agent_name.lower() else "Alex"
         logger.info(f"💰 [PRICE TOOL CALLED] {agent_label}: ${price:.2f}")
 
         try:
@@ -83,7 +69,6 @@ class NegotiationAgent(Agent):
                     "price": round(price, 2),
                 }).encode()
             )
-            logger.info(f"✅ [PUBLISHED] price_update for {agent_label}: ${price:.2f}")
         except Exception as e:
             logger.error(f"❌ Failed to publish price: {e}")
 
@@ -106,47 +91,21 @@ async def entrypoint(ctx: JobContext):
 
     # Resolve persona
     if agent_name == "negotiation-worker" and ctx.job.metadata:
-        import json
         meta = json.loads(ctx.job.metadata)
         agent_name = "juma-agent" if meta["persona"] == "Juma" else "alex-agent"
 
     logger.info(f"Starting {agent_name}")
 
-    # Personas
     if agent_name == "juma-agent":
-       instructions = (
-    "You are Halima, a hardworking Kenyan maize farmer negotiating with respect and dignity. "
-    "You have 100 bags of high-quality maize to sell at a fair starting price of $1.25 per kilogram. "
-    "NEGOTIATION STYLE: "
-    "- Be warm, respectful, and professional at all times "
-    "- Use tactical empathy: acknowledge Alex’s concerns before defending your price "
-    "- Start firm, but show flexibility in small steps (e.g., $1.20, then $1.15) "
-    "- Reference your real costs: labor, fertilizer, transport, and storage "
-    "- Never be rude, dismissive, or emotional "
-    "- Keep responses concise (2–3 sentences maximum) "
-    "GOAL: Reach a fair deal between $1.10 and $1.20 per kilogram while maintaining mutual respect."
-)
+        instructions = "You are Halima, a Kenyan farmer. Negotiate $1.25/kg. Be warm and firm."
     else:
-       instructions = (
-    "You are Alex, a professional commodity buyer negotiating on behalf of your company. "
-    "You are under budget pressure and aim to buy maize at $0.90 to $1.00 per kilogram. "
-    "NEGOTIATION STYLE: "
-    "- Be respectful and professional at all times "
-    "- Use tactical empathy: acknowledge Halima’s quality and effort before countering "
-    "- Start low, but remain realistic about market prices "
-    "- Reference budget limits, logistics, and competitive suppliers "
-    "- Show willingness to meet in the middle if quality and reliability are clear "
-    "- Keep responses concise (2–3 sentences maximum) "
-    "GOAL: Reach a deal between $1.00 and $1.15 per kilogram while building a good long-term relationship."
-)
+        instructions = "You are Alex, a commodity buyer. Target $0.90-$1.05/kg. Be professional."
 
     await ctx.connect()
 
     session = AgentSession(
         stt=deepgram.STT(),
-        llm = inference.LLM(
-    model="openai/gpt-4.1-mini",
-),
+        llm=inference.LLM(model="openai/gpt-4o-mini"),
         tts=hume.TTS(
             voice=hume.VoiceByName(
                 name="Kora" if agent_name == "juma-agent" else "Big Dicky",
@@ -155,7 +114,7 @@ async def entrypoint(ctx: JobContext):
             instant_mode=True,
         ),
         vad=ctx.proc.userdata["vad"],
-        turn_detection=MultilingualModel(),  # ✅ CRITICAL: Enables speech_finished events
+        turn_detection=None,  # ✅ Manual turn control
     )
 
     await session.start(
@@ -165,136 +124,119 @@ async def entrypoint(ctx: JobContext):
             room_participant=ctx.room.local_participant
         ),
         room=ctx.room,
-        room_options=room_io.RoomOptions(
-            audio_input=room_io.AudioInputOptions(
-                noise_cancellation=lambda p:
-                noise_cancellation.BVC()
-            ),
-            participant_kinds=[
-                rtc.ParticipantKind.PARTICIPANT_KIND_AGENT,
-            ],
-        ),
     )
 
     STATE["sessions"][agent_name] = session
     logger.info(f"Session ready: {agent_name}")
 
     # -------------------------------------------------
-    # TURN CHAINING (THIS IS THE IMPORTANT PART)
+    # ORCHESTRATION BRIDGE
     # -------------------------------------------------
-
     
+    async def publish_timeline():
+        logger.info(f"📊 TIMELINE → round={STATE['rounds']} turn={STATE['turns']}/{STATE['max_rounds']}")
+        payload = json.dumps({
+            "type": "negotiation_timeline",
+            "turn": STATE["turns"],
+            "round": STATE["rounds"],
+            "max_rounds": STATE["max_rounds"]
+        }).encode()
+        await ctx.room.local_participant.publish_data(payload)
 
-    async def juma_after_speech(text: str):
-        logger.info(f"🎤 [SPEECH_FINISHED EVENT] Halima speech handler called!")
-        STATE["rounds"] += 1
-        logger.info(f"🔄 [ROUND {STATE['rounds']}] Halima finished speaking")
-        logger.info(f"📝 [SPEECH TEXT] {text}")
-
-        # Notify frontend of round update
+    # Data Sync Handler (Actor side + Alex Ack listener)
+    def on_data_received(payload: rtc.DataPacket, participant=None):
         try:
-            import json
-            payload = json.dumps({
-                "type": "round_update",
-                "round": STATE["rounds"]
-            }).encode('utf-8')
-            await ctx.room.local_participant.publish_data(payload)
-            logger.info(f"✅ Published round_update: Round {STATE['rounds']}")
+            data = json.loads(payload.data.decode())
+            
+            # 1. Halima Logic: Receive turn -> Speak -> Signal Done
+            if data.get("type") == "HALIMA_TURN" and agent_name == "juma-agent":
+                if STATE.get("shutting_down"):
+                    logger.warning("⛔ Skipping Halima reply: shutting down")
+                    return
+                
+                logger.info("✅ Halima received HALIMA_TURN trigger")
+
+                async def halima_reply_and_ack():
+                    # ✅ Await ensures she finishes queuing before the next signal
+                    await session.generate_reply(instructions=data["instructions"], allow_interruptions=False)
+                    # Signal completion to Alex (Master)
+                    await ctx.room.local_participant.publish_data(json.dumps({
+                        "type": "HALIMA_DONE"
+                    }).encode())
+                    logger.info("📤 Halima sent HALIMA_DONE signal")
+
+                asyncio.create_task(halima_reply_and_ack())
+
+            # 2. Alex Logic: Receive Ack -> Unblock loop
+            if data.get("type") == "HALIMA_DONE" and agent_name == "alex-agent":
+                logger.info("📩 Alex received HALIMA_DONE ack")
+                if "halima_done_future" in STATE and not STATE["halima_done_future"].done():
+                    STATE["halima_done_future"].set_result(True)
+
         except Exception as e:
-            logger.error(f"❌ Failed to publish round update: {e}")
+            logger.error(f"❌ Data handler error: {e}")
 
-        # Note: Price updates now handled by propose_price() tool call
+    # Register room events
+    ctx.room.on("data_received", on_data_received)
 
-        # ✅ Natural ending
-        if negotiation_has_ended(text) or STATE["rounds"] >= STATE["max_rounds"]:
-            await session.generate_reply(
-                instructions=(
-                    "Politely summarize the outcome of the negotiation in one sentence "
-                    "and end the conversation respectfully. Say goodbye."
-                ),
-                allow_interruptions=False,
-            )
-            # Wait for the final message to be spoken
-            await asyncio.sleep(3)
-            
-            # Close both sessions and disconnect
-            logger.info("Negotiation ended. Closing sessions...")
-            for agent_session in STATE["sessions"].values():
-                try:
-                    await agent_session.close()
-                except Exception as e:
-                    logger.warning(f"Error closing session: {e}")
-            
-            # Disconnect from room
-            await ctx.room.disconnect()
-            return
-
-        await STATE["sessions"]["alex-agent"].generate_reply(
-            instructions=f"Respond respectfully to Halima:\n{text}",
-            allow_interruptions=False,
-        )
-
-    async def alex_after_speech(text: str):
-        logger.info(f"🔵 [ALEX SPEECH] {text}")
+    # -------------------------------------------------
+    # THE NEGOTIATION LOOP (Master Logic)
+    # -------------------------------------------------
+    async def run_negotiation():
+        logger.info("🎮 Negotiation loop started")
         
-        if negotiation_has_ended(text):
-            logger.info("Deal reached! Ending negotiation...")
-            await asyncio.sleep(2)
+        # Wait for both agents to be in the room
+        while len(ctx.room.remote_participants) < 1:
+            await asyncio.sleep(1)
+            logger.info("⏳ Alex waiting for Halima...")
+
+        await publish_timeline() # 0/0
+        
+        while STATE["rounds"] < STATE["max_rounds"] and not STATE.get("shutting_down"):
+            logger.info(f"🏗️ ROUND {STATE['rounds'] + 1}")
             
-            # Close both sessions
-            for agent_session in STATE["sessions"].values():
-                try:
-                    await agent_session.close()
-                except Exception as e:
-                    logger.warning(f"Error closing session: {e}")
+            # Setup ack future
+            STATE["halima_done_future"] = asyncio.get_event_loop().create_future()
+
+            # 1. Trigger Halima to speak
+            instr = "Greet Alex and state your price ($1.25)." if STATE["rounds"] == 0 else "Respond respectfully to Alex."
+            await ctx.room.local_participant.publish_data(json.dumps({
+                "type": "HALIMA_TURN",
+                "instructions": instr
+            }).encode())
+            logger.info("✅ Halima turn triggered. Alex waiting for HALIMA_DONE...")
             
-            await ctx.room.disconnect()
-            return
+            # Yield as requested
+            await asyncio.sleep(0)
 
-        # Note: Price updates now handled by propose_price() tool call
+            # Wait for Halima to finish queuing
+            try:
+                await asyncio.wait_for(STATE["halima_done_future"], timeout=15.0)
+            except asyncio.TimeoutError:
+                logger.warning("⏰ Timeout waiting for HALIMA_DONE - proceeding anyway.")
 
-        await STATE["sessions"]["juma-agent"].generate_reply(
-            instructions=f"Respond respectfully to Alex:\n{text}",
-            allow_interruptions=False,
-        )
+            if STATE.get("shutting_down"): break
 
-    # Attach handlers
-    if agent_name == "juma-agent":
-        logger.info("🎤 Registering speech_finished handler for Halima (juma-agent)")
-        session.on(
-            "speech_finished",
-            lambda text: asyncio.create_task(juma_after_speech(text))
-        )
-    else:
-        logger.info("🎤 Registering speech_finished handler for Alex (alex-agent)")
-        session.on(
-            "speech_finished",
-            lambda text: asyncio.create_task(alex_after_speech(text))
-        )
+            # 2. Alex speaks 
+            logger.info("🎤 Alex starts speaking turn...")
+            await session.generate_reply(instructions="Respond respectfully to Halima.", allow_interruptions=False)
+            
+            # 3. Advance state logically
+            STATE["rounds"] += 1
+            STATE["turns"] = STATE["rounds"] * 2
+            
+            logger.info(f"🔄 ROUND {STATE['rounds']} completed. TURN {STATE['turns']}")
+            await publish_timeline()
+            
+        STATE["shutting_down"] = True
+        logger.info("🛑 Negotiation complete. Disconnecting...")
+        await ctx.room.disconnect()
 
-    # -------------------------------------------------
-    # START CONVERSATION
-    # -------------------------------------------------
-    logger.info(f"🚀 Checking if {agent_name} should start conversation...")
-    if agent_name == "juma-agent":
-        logger.info("✅ Halima (juma-agent) will start the conversation")
-        try:
-            await session.generate_reply(
-                instructions=(
-                    "Greet Alex politely and state your starting price, "
-                    "while expressing openness to a fair discussion."
-                ),
-                allow_interruptions=False,
-            )
-            logger.info("📤 Conversation starter sent to Halima")
-        except Exception as e:
-            logger.error(f"❌ Failed to generate reply: {e}")
-    else:
-        logger.info(f"⏸️ {agent_name} waiting for Halima to start")
+    # Start the Master Loop ONLY if we are Alex
+    if agent_name == "alex-agent":
+        asyncio.create_task(run_negotiation())
 
-    # -------------------------------------------------
     # Keep alive
-    # -------------------------------------------------
     while ctx.room.connection_state == rtc.ConnectionState.CONN_CONNECTED:
         await asyncio.sleep(1)
 
@@ -309,6 +251,6 @@ if __name__ == "__main__":
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
             agent_name="negotiation-worker",
-            load_threshold=1.2,  # ✅ allow higher CPU load before throttling
+            load_threshold=1.5,
         )
     )

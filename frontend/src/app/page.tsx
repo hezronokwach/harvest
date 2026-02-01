@@ -8,15 +8,14 @@ import {
   useRoomContext,
 } from "@livekit/components-react";
 import { Participant, Track } from "livekit-client";
-import EmotionRadar from "@/components/EmotionRadar";
 import PriceGapSlider from "@/components/PriceGapSlider";
 import Transcript from "@/components/Transcript";
 import { RoomEvent, TranscriptionSegment, TrackPublication, RemoteParticipant } from "livekit-client";
 
-interface Emotions {
-  confidence: number;
-  stress: number;
-  urgency: number;
+interface Timeline {
+  turn: number;
+  round: number;
+  maxRounds: number;
 }
 
 interface Thought {
@@ -51,8 +50,7 @@ export default function Home() {
   const [hasMounted, setHasMounted] = useState(false);
   const [inRoom, setInRoom] = useState(false);
 
-  const [halimaEmotions, setHalimaEmotions] = useState({ confidence: 0.85, stress: 0.12, urgency: 0.45 });
-  const [alexEmotions, setAlexEmotions] = useState({ confidence: 0.62, stress: 0.78, urgency: 0.92 });
+  const [timeline, setTimeline] = useState<Timeline>({ turn: 0, round: 0, maxRounds: 8 });
 
   const [negotiation, setNegotiation] = useState<Negotiation>({
     ask: 1.25,
@@ -134,10 +132,8 @@ export default function Home() {
             setDealReached={setDealReached}
             negotiationProgress={negotiationProgress}
             setNegotiationProgress={setNegotiationProgress}
-            halimaEmotions={halimaEmotions}
-            alexEmotions={alexEmotions}
-            setHalimaEmotions={setHalimaEmotions}
-            setAlexEmotions={setAlexEmotions}
+            timeline={timeline}
+            setTimeline={setTimeline}
             barHeights={barHeights}
             thoughts={thoughts}
             setThoughts={setThoughts}
@@ -159,10 +155,8 @@ function DashboardContent({
   setDealReached,
   negotiationProgress,
   setNegotiationProgress,
-  halimaEmotions,
-  alexEmotions,
-  setHalimaEmotions,
-  setAlexEmotions,
+  timeline,
+  setTimeline,
   barHeights,
   thoughts,
   setThoughts,
@@ -176,10 +170,8 @@ function DashboardContent({
   setDealReached: React.Dispatch<React.SetStateAction<boolean>>;
   negotiationProgress: number;
   setNegotiationProgress: React.Dispatch<React.SetStateAction<number>>;
-  halimaEmotions: Emotions;
-  alexEmotions: Emotions;
-  setHalimaEmotions: React.Dispatch<React.SetStateAction<Emotions>>;
-  setAlexEmotions: React.Dispatch<React.SetStateAction<Emotions>>;
+  timeline: Timeline;
+  setTimeline: React.Dispatch<React.SetStateAction<Timeline>>;
   barHeights: { orange: number[]; blue: number[] };
   thoughts: Thought[];
   setThoughts: React.Dispatch<React.SetStateAction<Thought[]>>;
@@ -193,66 +185,63 @@ function DashboardContent({
     if (!room) return;
 
     const onDataReceived = (payload: Uint8Array, participant?: Participant) => {
-      const decoder = new TextDecoder();
+      const raw = new TextDecoder().decode(payload);
+      console.warn("📥 RAW DATA RECEIVED:", raw, {
+        from: participant?.identity || participant?.sid,
+      });
+
+      let data;
       try {
-        const data = JSON.parse(decoder.decode(payload));
-
-        // For price_update, trust the agent field from backend
-        // For other messages, derive from participant
-        const agentName = data.type === "price_update"
-          ? data.agent
-          : (participant?.name || (participant?.identity.includes("halima") || participant?.identity.includes("juma") ? "Halima" : "Alex"));
-
-        if (data.type === "thought") {
-          const id = `${agentName}-${crypto.randomUUID()}`;
-          setThoughts((prev: Thought[]) => [
-            { id, agent: agentName, text: data.text, type: "insight" },
-            ...prev.slice(0, 9),
-          ]);
-
-          // Dynamic Emotion Detection
-          const emotionMap: Record<string, Emotions> = {
-            'confident': { confidence: 0.9, stress: 0.1, urgency: 0.3 },
-            'concerned': { confidence: 0.4, stress: 0.6, urgency: 0.5 },
-            'frustrated': { confidence: 0.3, stress: 0.8, urgency: 0.7 },
-            'hopeful': { confidence: 0.7, stress: 0.2, urgency: 0.4 },
-            'satisfied': { confidence: 0.95, stress: 0.05, urgency: 0.1 },
-            'respectful': { confidence: 0.8, stress: 0.1, urgency: 0.2 }
-          };
-
-          const detectedKey = Object.keys(emotionMap).find(key => data.text.toLowerCase().includes(key));
-          if (detectedKey) {
-            if (agentName === "Halima") setHalimaEmotions(emotionMap[detectedKey]);
-            if (agentName === "Alex") setAlexEmotions(emotionMap[detectedKey]);
-          }
-
-        } else if (data.type === "emotions") {
-          const emotions = {
-            confidence: data.confidence ?? 0.5,
-            stress: data.stress ?? 0.1,
-            urgency: data.urgency ?? 0.2
-          };
-          if (agentName === "Halima") setHalimaEmotions(emotions);
-          if (agentName === "Alex") setAlexEmotions(emotions);
-        } else if (data.type === "round_update") {
-          const progress = (data.round / 8) * 100;
-          setNegotiationProgress(progress);
-        } else if (data.type === "price_update") {
-          setNegotiation((prev: Negotiation) => ({
-            ...prev,
-            ask: data.agent === "Halima" ? data.price : prev.ask,
-            bid: data.agent === "Alex" ? data.price : prev.bid,
-          }));
-        } else if (data.type === "deal_reached") {
-          setNegotiation({
-            ask: data.price,
-            bid: data.price,
-            target: data.price,
-          });
-          setDealReached(true);
-        }
+        data = JSON.parse(raw);
+        console.warn("✅ PARSED DATA:", data);
       } catch (e) {
-        console.error("Failed to parse data message:", e);
+        console.error("❌ JSON parse failed:", raw);
+        return;
+      }
+
+      // For price_update, trust the agent field from backend
+      // For other messages, derive from participant
+      const agentName = data.type === "price_update"
+        ? data.agent
+        : (participant?.name || (participant?.identity.includes("halima") || participant?.identity.includes("juma") ? "Halima" : "Alex"));
+
+      if (data.type === "thought") {
+        const id = `${agentName}-${crypto.randomUUID()}`;
+        setThoughts((prev: Thought[]) => [
+          { id, agent: agentName, text: data.text, type: "insight" },
+          ...prev.slice(0, 9),
+        ]);
+      } else if (data.type === "negotiation_timeline") {
+        console.warn("🟢 TIMELINE EVENT HIT", data);
+        console.warn("🟢 SETTING TIMELINE STATE", {
+          before: timeline,
+          incoming: data,
+        });
+
+        setTimeline({
+          turn: data.turn,
+          round: data.round,
+          maxRounds: data.max_rounds,
+        });
+        // Also sync global progress for the waveform
+        const progress = (data.round / data.max_rounds) * 100;
+        setNegotiationProgress(progress);
+      } else if (data.type === "round_update") {
+        const progress = (data.round / 8) * 100;
+        setNegotiationProgress(progress);
+      } else if (data.type === "price_update") {
+        setNegotiation((prev: Negotiation) => ({
+          ...prev,
+          ask: data.agent === "Halima" ? data.price : prev.ask,
+          bid: data.agent === "Alex" ? data.price : prev.bid,
+        }));
+      } else if (data.type === "deal_reached") {
+        setNegotiation({
+          ask: data.price,
+          bid: data.price,
+          target: data.price,
+        });
+        setDealReached(true);
       }
     };
 
@@ -287,6 +276,10 @@ function DashboardContent({
       });
     };
 
+    room.on(RoomEvent.Connected, () => {
+      console.warn("✅ ROOM CONNECTED");
+    });
+
     room.on(RoomEvent.DataReceived, onDataReceived);
     room.on(RoomEvent.TranscriptionReceived, handleTranscription);
 
@@ -294,7 +287,11 @@ function DashboardContent({
       room.off(RoomEvent.DataReceived, onDataReceived);
       room.off(RoomEvent.TranscriptionReceived, handleTranscription);
     };
-  }, [room, setThoughts, setTranscripts, setHalimaEmotions, setAlexEmotions, setNegotiationProgress]);
+  }, [room, setThoughts, setTranscripts, setTimeline, setNegotiationProgress, timeline]);
+
+  useEffect(() => {
+    console.warn("🔁 TIMELINE STATE CHANGED:", timeline);
+  }, [timeline]);
 
   // Track-based role mapping for agents (LiveKit agent IDs are randomized)
   const tracks = useTracks(
@@ -313,6 +310,10 @@ function DashboardContent({
 
   return (
     <div className="max-w-7xl mx-auto">
+      <div className="mb-4 p-3 bg-red-900/80 text-white font-mono text-[10px] border border-red-500 rounded flex justify-between items-center backdrop-blur-sm">
+        <span>[FRONTEND DEBUG] TIMELINE STATE → turn={timeline.turn}, round={timeline.round}/{timeline.maxRounds}</span>
+        <span className="opacity-50">AUTHORITY: ALEX</span>
+      </div>
       <div className="flex justify-between items-center mb-12 border-b border-white/5 pb-8">
         <div>
           <h1 className="text-3xl font-black tracking-tighter uppercase italic flex items-center gap-2">
@@ -376,20 +377,11 @@ function DashboardContent({
             dealReached={dealReached}
           />
 
-          <div className="grid grid-cols-2 gap-8">
-            <div className="transition-all duration-700 p-1 rounded-2xl" style={{
-              background: halimaEmotions.stress > 0.5 ? 'rgba(239, 68, 68, 0.1)' : halimaEmotions.confidence > 0.8 ? 'rgba(249, 115, 22, 0.1)' : 'transparent',
-              boxShadow: halimaEmotions.stress > 0.6 ? '0 0 40px rgba(239, 68, 68, 0.05)' : halimaEmotions.confidence > 0.8 ? '0 0 40px rgba(249, 115, 22, 0.05)' : 'none'
-            }}>
-              <EmotionRadar agentName="Halima (Seller)" scores={halimaEmotions} color="#f97316" />
-            </div>
-            <div className="transition-all duration-700 p-1 rounded-2xl" style={{
-              background: alexEmotions.stress > 0.5 ? 'rgba(239, 68, 68, 0.1)' : alexEmotions.confidence > 0.8 ? 'rgba(59, 130, 246, 0.1)' : 'transparent',
-              boxShadow: alexEmotions.stress > 0.6 ? '0 0 40px rgba(239, 68, 68, 0.05)' : alexEmotions.confidence > 0.8 ? '0 0 40px rgba(59, 130, 246, 0.05)' : 'none'
-            }}>
-              <EmotionRadar agentName="Alex (Buyer)" scores={alexEmotions} color="#3b82f6" />
-            </div>
-          </div>
+          <NegotiationTimeline
+            turn={timeline.turn}
+            round={timeline.round}
+            maxRounds={timeline.maxRounds}
+          />
 
           <div className="h-48 rounded-xl bg-gradient-to-t from-orange-500/5 to-transparent border border-white/5 flex flex-col items-center justify-center relative overflow-hidden">
             <div className="absolute top-4 left-4 flex items-center gap-3">
@@ -440,6 +432,53 @@ function DashboardContent({
 
         <div className="col-span-4 h-[calc(100vh-220px)] flex flex-col">
           <Transcript transcripts={transcripts} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NegotiationTimeline({ turn, round, maxRounds }: { turn: number; round: number; maxRounds: number }) {
+  console.warn("📊 NegotiationTimeline render", { turn, round, maxRounds });
+  function getPhase(round: number, max: number) {
+    if (round === 0) return { label: "INTRO", color: "text-gray-400" };
+    if (round === 1) return { label: "ANCHOR", color: "text-orange-500" };
+    if (round < max * 0.5) return { label: "COUNTER", color: "text-blue-500" };
+    if (round < max - 1) return { label: "CONVERGENCE", color: "text-green-500" };
+    return { label: "CLOSING", color: "text-red-500 animate-pulse" };
+  }
+
+  const phase = getPhase(round, maxRounds);
+
+  return (
+    <div className="bg-white/5 border border-white/10 rounded-2xl p-6">
+      <div className="flex justify-between items-center mb-6">
+        <h3 className="text-[10px] font-bold text-gray-500 uppercase tracking-[0.3em]">Negotiation Matrix</h3>
+        <div className="flex gap-2">
+          {Array.from({ length: maxRounds }).map((_, i) => (
+            <div
+              key={i}
+              className={`w-1.5 h-1.5 rounded-full transition-all duration-500 ${i < round ? "bg-orange-500 shadow-[0_0_8px_rgba(249,115,22,0.4)]" : "bg-white/10"
+                }`}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-8">
+        <div className="space-y-1">
+          <p className="text-[8px] font-mono text-gray-600 uppercase">Phase</p>
+          <p className={`text-xl font-black tracking-tighter ${phase.color}`}>{phase.label}</p>
+        </div>
+        <div className="space-y-1 border-l border-white/5 pl-8">
+          <p className="text-[8px] font-mono text-gray-600 uppercase">Total Turns</p>
+          <p className="text-xl font-black tracking-tighter text-white">{turn}</p>
+        </div>
+        <div className="space-y-1 border-l border-white/5 pl-8">
+          <p className="text-[8px] font-mono text-gray-600 uppercase">Rounds Complete</p>
+          <p className="text-xl font-black tracking-tighter text-white">
+            {round} <span className="text-xs text-gray-600">/ {maxRounds}</span>
+          </p>
         </div>
       </div>
     </div>
