@@ -41,6 +41,7 @@ STATE = {
     "max_rounds": 8,
     "sessions": {},
     "shutting_down": False,
+    "halima_speaking": False,
 }
 
 # -------------------------------------------------
@@ -117,17 +118,25 @@ async def entrypoint(ctx: JobContext):
         turn_detection=None,  # ✅ Manual turn control
     )
 
-    await session.start(
-        agent=NegotiationAgent(
-            instructions=instructions,
-            agent_name=agent_name,
-            room_participant=ctx.room.local_participant
-        ),
-        room=ctx.room,
+    agent = NegotiationAgent(
+        instructions=instructions,
+        agent_name=agent_name,
+        room_participant=ctx.room.local_participant
     )
 
-    STATE["sessions"][agent_name] = session
-    logger.info(f"Session ready: {agent_name}")
+    await session.start(
+        agent=agent,
+        room=ctx.room,
+        room_options=room_io.RoomOptions(
+            close_on_disconnect=False
+        ),
+    )
+
+    STATE["sessions"][agent_name] = {
+        "session": session,
+        "agent": agent
+    }
+    logger.info(f"Session & Agent ready: {agent_name}")
 
     # -------------------------------------------------
     # ORCHESTRATION BRIDGE
@@ -143,9 +152,19 @@ async def entrypoint(ctx: JobContext):
         }).encode()
         await ctx.room.local_participant.publish_data(payload)
 
+    async def publish_negotiation_complete():
+        logger.info("🏁 Sending NEGOTIATION_COMPLETE signal")
+        await ctx.room.local_participant.publish_data(
+            json.dumps({"type": "NEGOTIATION_COMPLETE"}).encode()
+        )
+
     # Data Sync Handler (Actor side + Alex Ack listener)
     def on_data_received(payload: rtc.DataPacket, participant=None):
         try:
+            # ⛔ Filter our own broadcasts (prevents duplicate triggers)
+            if participant and participant.identity == ctx.room.local_participant.identity:
+                return
+
             data = json.loads(payload.data.decode())
             
             # 1. Halima Logic: Receive turn -> Speak -> Signal Done
@@ -154,24 +173,60 @@ async def entrypoint(ctx: JobContext):
                     logger.warning("⛔ Skipping Halima reply: shutting down")
                     return
                 
+                if STATE.get("halima_speaking"):
+                    logger.warning("⏳ Halima is already speaking/generating. Ignoring duplicate trigger.")
+                    return
+
                 logger.info("✅ Halima received HALIMA_TURN trigger")
+                STATE["halima_speaking"] = True
 
                 async def halima_reply_and_ack():
-                    # ✅ Await ensures she finishes queuing before the next signal
-                    await session.generate_reply(instructions=data["instructions"], allow_interruptions=False)
-                    # Signal completion to Alex (Master)
-                    await ctx.room.local_participant.publish_data(json.dumps({
-                        "type": "HALIMA_DONE"
-                    }).encode())
-                    logger.info("📤 Halima sent HALIMA_DONE signal")
+                    try:
+                        if STATE.get("shutting_down"): 
+                            logger.warning("⛔ Halima task cancelled: shutting down")
+                            return
 
+                        # Generate reply and get a SpeechHandle (returns when text is ready)
+                        handle = await session.generate_reply(instructions=data["instructions"], allow_interruptions=False)
+                        
+                        # ✅ Text is ready immediately on the handle
+                        halima_text = handle.text if hasattr(handle, "text") else data["instructions"]
+
+                        # Safety guard: prevent ACK if master loop is already satisfied or closing
+                        if STATE.get("shutting_down"): return
+                        if STATE.get("halima_done_future") and STATE["halima_done_future"].done():
+                            logger.warning("⚠️ Halima turn already acknowledged. Skipping duplicate ACK.")
+                            return
+
+                        # Signal completion and SHARE TEXT to bridge context
+                        await ctx.room.local_participant.publish_data(json.dumps({
+                            "type": "HALIMA_DONE",
+                            "text": halima_text
+                        }).encode())
+                        logger.info(f"📤 Halima sent HALIMA_DONE with text: {halima_text}")
+                    finally:
+                        STATE["halima_speaking"] = False
+
+                # Dispatch her turn
                 asyncio.create_task(halima_reply_and_ack())
 
-            # 2. Alex Logic: Receive Ack -> Unblock loop
+            # 2. Alex Logic: Receive Ack -> Store Context -> Unblock loop
             if data.get("type") == "HALIMA_DONE" and agent_name == "alex-agent":
-                logger.info("📩 Alex received HALIMA_DONE ack")
+                halima_text = data.get("text", "")
+                logger.info(f"📩 Alex received Halima text: {halima_text}")
+                
+                if halima_text:
+                    STATE["last_halima_text"] = halima_text
+
                 if "halima_done_future" in STATE and not STATE["halima_done_future"].done():
                     STATE["halima_done_future"].set_result(True)
+
+            # 3. Actor Sync: Halima "hears" Alex
+            if data.get("type") == "ALEX_SPEECH" and agent_name == "juma-agent":
+                alex_text = data.get("text", "")
+                logger.info(f"📥 Halima heard Alex: {alex_text}")
+                if alex_text:
+                    STATE["last_alex_text"] = alex_text
 
         except Exception as e:
             logger.error(f"❌ Data handler error: {e}")
@@ -185,10 +240,10 @@ async def entrypoint(ctx: JobContext):
     async def run_negotiation():
         logger.info("🎮 Negotiation loop started")
         
-        # Wait for both agents to be in the room
-        while len(ctx.room.remote_participants) < 1:
+        # Wait for both agents to be in the room and registered
+        while len(ctx.room.remote_participants) < 1 or len(STATE["sessions"]) < 2:
             await asyncio.sleep(1)
-            logger.info("⏳ Alex waiting for Halima...")
+            logger.info(f"⏳ Alex waiting... (participants={len(ctx.room.remote_participants)}, agents={len(STATE['sessions'])})")
 
         await publish_timeline() # 0/0
         
@@ -196,30 +251,49 @@ async def entrypoint(ctx: JobContext):
             logger.info(f"🏗️ ROUND {STATE['rounds'] + 1}")
             
             # Setup ack future
-            STATE["halima_done_future"] = asyncio.get_event_loop().create_future()
+            STATE["halima_done_future"] = asyncio.get_running_loop().create_future()
 
             # 1. Trigger Halima to speak
-            instr = "Greet Alex and state your price ($1.25)." if STATE["rounds"] == 0 else "Respond respectfully to Alex."
+            last_alex = STATE.get("last_alex_text", "Introductions phase.")
+            instr = f"Greet Alex and propose $1.25/kg." if STATE["rounds"] == 0 else f"Respond to Alex. He said: '{last_alex}'"
+            
             await ctx.room.local_participant.publish_data(json.dumps({
                 "type": "HALIMA_TURN",
                 "instructions": instr
             }).encode())
             logger.info("✅ Halima turn triggered. Alex waiting for HALIMA_DONE...")
             
-            # Yield as requested
-            await asyncio.sleep(0)
+            # Yield to let Halima start first
+            await asyncio.sleep(0.3)
 
             # Wait for Halima to finish queuing
             try:
-                await asyncio.wait_for(STATE["halima_done_future"], timeout=15.0)
+                await asyncio.wait_for(STATE["halima_done_future"], timeout=60.0)
             except asyncio.TimeoutError:
-                logger.warning("⏰ Timeout waiting for HALIMA_DONE - proceeding anyway.")
+                logger.error("❌ Halima did not respond in time (60s timeout). Ending negotiation.")
+                STATE["shutting_down"] = True
+                break
 
             if STATE.get("shutting_down"): break
 
+            halima_text = STATE.get("last_halima_text", "Halima is considering your offer.")
+
             # 2. Alex speaks 
+            if STATE.get("shutting_down"): break
             logger.info("🎤 Alex starts speaking turn...")
-            await session.generate_reply(instructions="Respond respectfully to Halima.", allow_interruptions=False)
+            
+            alex_instr = f"Respond to Halima. she said: '{halima_text}'"
+            result = await session.generate_reply(instructions=alex_instr, allow_interruptions=False)
+            
+            # ✅ Extract fixed text from result
+            alex_text = result.text if hasattr(result, "text") else "I understand your point."
+            STATE["last_alex_text"] = alex_text
+
+            # Broadcast Alex's text so Halima can "hear" it
+            await ctx.room.local_participant.publish_data(json.dumps({
+                "type": "ALEX_SPEECH",
+                "text": alex_text
+            }).encode())
             
             # 3. Advance state logically
             STATE["rounds"] += 1
@@ -228,9 +302,9 @@ async def entrypoint(ctx: JobContext):
             logger.info(f"🔄 ROUND {STATE['rounds']} completed. TURN {STATE['turns']}")
             await publish_timeline()
             
-        STATE["shutting_down"] = True
-        logger.info("🛑 Negotiation complete. Disconnecting...")
-        await ctx.room.disconnect()
+        await publish_negotiation_complete()
+        logger.info("🏁 Negotiation loop finished. Alex entering idle state.")
+        return
 
     # Start the Master Loop ONLY if we are Alex
     if agent_name == "alex-agent":
