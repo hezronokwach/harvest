@@ -10,7 +10,6 @@ import {
 import { Participant } from "livekit-client";
 import EmotionRadar from "@/components/EmotionRadar";
 import PriceGapSlider from "@/components/PriceGapSlider";
-import InnerMonologue from "@/components/InnerMonologue";
 import Transcript from "@/components/Transcript";
 import { RoomEvent, TranscriptionSegment, TrackPublication, RemoteParticipant } from "livekit-client";
 
@@ -245,17 +244,36 @@ function DashboardContent({
       }
     };
 
-    // const handleTranscription = (segments: TranscriptionSegment[], participant?: Participant) => {
-    //   segments.forEach(segment => {
-    //     if (segment.final && participant) {
-    //       const agentName = participant.identity.includes('halima') || participant.identity.includes('juma') ? 'Halima' : 'Alex';
-    //       setTranscripts(prev => [
-    //         { id: crypto.randomUUID(), agent: agentName, text: segment.text },
-    //         ...prev.slice(0, 19)
-    //       ]);
-    //     }
-    //   });
-    // };
+    const handleTranscription = (
+      segments: TranscriptionSegment[],
+      participant?: Participant
+    ) => {
+      if (!participant) return;
+
+      const agentName =
+        participant.identity.includes("halima") ||
+          participant.identity.includes("juma")
+          ? "Halima"
+          : "Alex";
+
+      const finalSegments = segments.filter(s => s.final && s.text.trim());
+
+      if (finalSegments.length === 0) return;
+
+      setTranscripts(prev => {
+        const next = [
+          ...prev,
+          ...finalSegments.map(segment => ({
+            id: crypto.randomUUID(),
+            agent: agentName,
+            text: segment.text,
+          })),
+        ];
+
+        // ✅ cap buffer to last 50 entries
+        return next.length > 50 ? next.slice(-50) : next;
+      });
+    };
 
     const handleConnected = (participant: RemoteParticipant) => {
       if (participant.identity.includes('halima') || participant.identity.includes('juma')) {
@@ -274,7 +292,7 @@ function DashboardContent({
     };
 
     room.on(RoomEvent.DataReceived, onDataReceived);
-    // room.on(RoomEvent.TranscriptionReceived, handleTranscription);
+    room.on(RoomEvent.TranscriptionReceived, handleTranscription);
     room.on(RoomEvent.ParticipantConnected, handleConnected);
     room.on(RoomEvent.ParticipantDisconnected, handleDisconnected);
 
@@ -286,7 +304,7 @@ function DashboardContent({
 
     return () => {
       room.off(RoomEvent.DataReceived, onDataReceived);
-      // room.off(RoomEvent.TranscriptionReceived, handleTranscription);
+      room.off(RoomEvent.TranscriptionReceived, handleTranscription);
       room.off(RoomEvent.ParticipantConnected, handleConnected);
       room.off(RoomEvent.ParticipantDisconnected, handleDisconnected);
     };
@@ -423,19 +441,8 @@ function DashboardContent({
           </div>
         </div>
 
-        <div className="col-span-4 space-y-8">
-          <InnerMonologue thoughts={thoughts} />
-
-          {/* <Transcript transcripts={transcripts} /> */}
-
-          <div className="p-6 rounded-xl bg-gradient-to-br from-orange-500 to-orange-600 text-black shadow-lg shadow-orange-500/20 active:scale-[0.98] transition-all">
-            <h4 className="text-[10px] font-black uppercase mb-1 opacity-60 tracking-widest">Current Strategy Directive</h4>
-            <p className="text-lg font-bold leading-tight italic tracking-tight">&quot;Focus on high-quality logistics. Emphasize Halima&apos;s reliable supply chain.&quot;</p>
-            <div className="mt-4 flex gap-2">
-              <span className="text-[8px] font-black uppercase border border-black/20 px-2 py-0.5 rounded tracking-tighter bg-black/5">Tactical Empathy</span>
-              <span className="text-[8px] font-black uppercase border border-black/20 px-2 py-0.5 rounded tracking-tighter bg-black/5">Supply Anchoring</span>
-            </div>
-          </div>
+        <div className="col-span-4 h-[calc(100vh-220px)] flex flex-col">
+          <Transcript transcripts={transcripts} />
         </div>
       </div>
     </div>

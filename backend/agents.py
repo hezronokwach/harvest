@@ -9,7 +9,8 @@ from livekit.agents import (
     room_io,
     function_tool,
 )
-from livekit.plugins import silero, noise_cancellation, deepgram, groq, hume
+from livekit.agents import inference
+from livekit.plugins import silero, noise_cancellation, deepgram, groq, hume, openai
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 from livekit import rtc
 from typing import Annotated
@@ -68,8 +69,8 @@ class NegotiationAgent(Agent):
         price: Annotated[
             float,
             Field(description="Proposed price per kilogram in USD")
-        ]
-    ):
+        ],
+    ) -> None:
         """Tool for agents to propose a price during negotiation"""
         agent_label = "Halima" if "Halima" in self.agent_name else "Alex"
         logger.info(f"💰 [PRICE TOOL CALLED] {agent_label}: ${price:.2f}")
@@ -123,19 +124,7 @@ async def entrypoint(ctx: JobContext):
     "- Reference your real costs: labor, fertilizer, transport, and storage "
     "- Never be rude, dismissive, or emotional "
     "- Keep responses concise (2–3 sentences maximum) "
-    "GOAL: Reach a fair deal between $1.10 and $1.20 per kilogram while maintaining mutual respect.\n"
-    "\n"
-    "IMPORTANT RULES ABOUT PRICES:\n"
-    "- You may propose a price at most ONCE per turn.\n"
-    "- Only call the tool propose_price(price) IF AND ONLY IF your proposed price is DIFFERENT from your last proposal.\n"
-    "- If you are repeating the same price, do NOT call the tool.\n"
-    "- Never explain or mention tool usage in speech.\n"
-    "\n"
-    "CRITICAL RULES:\n"
-    "- NEVER mention tools, functions, APIs, prices as calls, or internal actions.\n"
-    "- NEVER say phrases like 'I am calling', 'I will now', 'price value equals', or similar.\n"
-    "- Tools are silent internal actions and must not be spoken aloud.\n"
-    "- Only speak natural conversational language intended for a human listener."
+    "GOAL: Reach a fair deal between $1.10 and $1.20 per kilogram while maintaining mutual respect."
 )
     else:
        instructions = (
@@ -148,26 +137,16 @@ async def entrypoint(ctx: JobContext):
     "- Reference budget limits, logistics, and competitive suppliers "
     "- Show willingness to meet in the middle if quality and reliability are clear "
     "- Keep responses concise (2–3 sentences maximum) "
-    "GOAL: Reach a deal between $1.00 and $1.15 per kilogram while building a good long-term relationship.\n"
-    "\n"
-    "IMPORTANT RULES ABOUT PRICES:\n"
-    "- You may propose a price at most ONCE per turn.\n"
-    "- Only call the tool propose_price(price) IF AND ONLY IF your proposed price is DIFFERENT from your last proposal.\n"
-    "- If you are repeating the same price, do NOT call the tool.\n"
-    "- Never explain or mention tool usage in speech.\n"
-    "\n"
-    "CRITICAL RULES:\n"
-    "- NEVER mention tools, functions, APIs, prices as calls, or internal actions.\n"
-    "- NEVER say phrases like 'I am calling', 'I will now', 'price value equals', or similar.\n"
-    "- Tools are silent internal actions and must not be spoken aloud.\n"
-    "- Only speak natural conversational language intended for a human listener."
+    "GOAL: Reach a deal between $1.00 and $1.15 per kilogram while building a good long-term relationship."
 )
 
     await ctx.connect()
 
     session = AgentSession(
         stt=deepgram.STT(),
-         llm=groq.LLM(model="llama-3.3-70b-versatile"),
+        llm = inference.LLM(
+    model="openai/gpt-4.1-mini",
+),
         tts=hume.TTS(
             voice=hume.VoiceByName(
                 name="Kora" if agent_name == "juma-agent" else "Big Dicky",

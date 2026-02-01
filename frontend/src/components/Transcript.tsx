@@ -1,16 +1,16 @@
 import React, { useEffect, useRef } from "react";
 
-interface Transcript {
+interface TranscriptMessage {
     id: string;
     agent: string;
     text: string;
 }
 
 interface TranscriptProps {
-    transcripts: Transcript[];
+    transcripts: TranscriptMessage[];
 }
 
-export default function Transcript({ transcripts }: TranscriptProps) {
+const Transcript = ({ transcripts }: TranscriptProps) => {
     const scrollRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -32,7 +32,7 @@ export default function Transcript({ transcripts }: TranscriptProps) {
 
             <div
                 ref={scrollRef}
-                className="p-4 space-y-4 overflow-y-auto max-h-[300px] scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10"
+                className="p-4 space-y-4 overflow-y-auto flex-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/10"
             >
                 {transcripts.length === 0 ? (
                     <div className="h-20 flex items-center justify-center">
@@ -69,4 +69,6 @@ export default function Transcript({ transcripts }: TranscriptProps) {
       `}</style>
         </div>
     );
-}
+};
+
+export default React.memo(Transcript);
