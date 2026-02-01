@@ -41,6 +41,7 @@ STATE = {
     "sessions": {},
     "shutting_down": False,
     "halima_speaking": False,
+    "accepted_offer": None,
     "offers": {
         "halima": None,
         "alex": None,
@@ -112,6 +113,24 @@ class NegotiationAgent(Agent):
         except Exception as e:
             logger.error(f"❌ Failed to publish offer: {e}")
 
+    @function_tool
+    async def accept_offer(self) -> None:
+        agent_label = "Halima" if "juma" in self.agent_name.lower() else "Alex"
+        offer = STATE["offers"]["alex" if agent_label == "Halima" else "halima"]
+
+        if not offer:
+            return
+
+        STATE["accepted_offer"] = offer
+
+        await self.room_participant.publish_data(
+            json.dumps({
+            "type": "OFFER_ACCEPTED",
+            "by": agent_label,
+            "offer": offer,
+        }).encode()
+    )
+
 # -------------------------------------------------
 # Server
 # -------------------------------------------------
@@ -143,13 +162,15 @@ Negotiate using: price per kg (target $1.25), delivery inclusion, transport resp
 Strategy: Concede occasionally but not repeatedly on the same dimension. 
 Be warm and practical. Explain constraints (fertilizer, labor, cash flow) naturally without repeating the same reason twice.
 If you are starting the negotiation, you must make an initial concrete offer.
-Only call propose_offer when making a concrete counter-offer. You may speak without making an offer."""
+Only call propose_offer when making a concrete counter-offer. You may speak without making an offer.
+If the buyer meets your minimum acceptable terms, you should accept the deal."""
     else:
         instructions = """You are Alex, a professional commodity buyer.
 Goal: Minimize total landed cost and risk.
 Strategy: Evaluate offers holistically. You may accept higher prices if delivery or payment terms improve.
 Be concise and analytical. reject and explain why, or counter with a different bundle.
-Only call propose_offer when making a concrete counter-offer. You may speak without making an offer."""
+Only call propose_offer when making a concrete counter-offer. You may speak without making an offer.
+If an offer meets your target total cost and risk, you should accept it instead of continuing."""
 
     await ctx.connect()
 
@@ -187,6 +208,7 @@ Only call propose_offer when making a concrete counter-offer. You may speak with
         "session": session,
         "agent": agent
     }
+    STATE["accepted_offer"] = None
     logger.info(f"Session & Agent ready: {agent_name}")
 
     # -------------------------------------------------
@@ -246,7 +268,7 @@ Only call propose_offer when making a concrete counter-offer. You may speak with
 
                         # Robust retry loop for transcription lag
                         halima_text = ""
-                        for _ in range(20):   # up to ~1 second
+                        for _ in range(8):   # up to ~1 second
                             halima_text = agent.consume_spoken_text()
                             if halima_text:
                                 break
@@ -297,6 +319,8 @@ Only call propose_offer when making a concrete counter-offer. You may speak with
     # -------------------------------------------------
     async def run_negotiation():
         logger.info("🎮 Negotiation loop started")
+        if STATE.get("accepted_offer"):
+            return        
         
         # Wait for both agents to be in the room and registered
         while len(ctx.room.remote_participants) < 1 or len(STATE["sessions"]) < 2:
@@ -306,8 +330,9 @@ Only call propose_offer when making a concrete counter-offer. You may speak with
         await publish_timeline() # 0/0
         
         while STATE["rounds"] < STATE["max_rounds"] and not STATE.get("shutting_down"):
-            logger.info(f"🏗️ ROUND {STATE['rounds'] + 1}")
-            
+            if STATE.get("accepted_offer"):
+                return
+            logger.info(f"🏗️ ROUND {STATE['rounds'] + 1}")            
             # Setup ack future
             STATE["halima_done_future"] = asyncio.get_running_loop().create_future()
 
@@ -333,11 +358,28 @@ Only call propose_offer when making a concrete counter-offer. You may speak with
             logger.info("✅ Halima turn triggered. Alex waiting for HALIMA_DONE...")
             
             # Yield to let Halima start first
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.2)
 
             # Wait for Halima to finish queuing
             try:
+                # ✅ Wait for Halima to finish
                 await asyncio.wait_for(STATE["halima_done_future"], timeout=60.0)
+
+                # ✅ ALEX ACCEPTANCE GUARD
+                halima_offer = STATE["offers"]["halima"]
+
+                if halima_offer:
+                    price = halima_offer["price"]
+                    delivery = halima_offer["delivery_included"]
+                    payment = halima_offer["payment_terms"]
+
+                    if price <= 1.20 and delivery and payment in ("7_days", "14_days"):
+                        logger.info("✅ Alex accepts Halima's offer")
+
+                        await agent.accept_offer()
+                        await publish_negotiation_complete()
+                        return
+
             except asyncio.TimeoutError:
                 logger.error("❌ Halima did not respond in time (60s timeout). Ending negotiation.")
                 STATE["shutting_down"] = True
@@ -345,7 +387,7 @@ Only call propose_offer when making a concrete counter-offer. You may speak with
 
             if STATE.get("shutting_down"): break
 
-            halima_text = STATE.get("last_halima_text", "Halima is considering your offer.")
+            halima_text = STATE.get("last_halima_text", "Halima is considering your offer.")                      
 
             # 2. Alex speaks 
             if STATE.get("shutting_down"): break
@@ -368,7 +410,7 @@ Only call propose_offer when making a concrete counter-offer. You may speak with
 
             # Robust retry loop for transcription lag
             alex_text = ""
-            for _ in range(20):
+            for _ in range(8):
                 alex_text = agent.consume_spoken_text()
                 if alex_text:
                     break
@@ -385,6 +427,22 @@ Only call propose_offer when making a concrete counter-offer. You may speak with
                 "speaker": "Alex",
                 "text": alex_text
             }).encode())
+
+            # ✅ HALIMA ACCEPTANCE GUARD (Halima accepts Alex's offer)
+            alex_offer = STATE["offers"]["alex"]
+
+            if alex_offer:
+                price = alex_offer["price"]
+                payment = alex_offer["payment_terms"]
+
+                if price >= 1.20 and payment in ("7_days", "14_days"):
+                    logger.info("✅ Halima accepts Alex's offer")
+
+                    await agent.accept_offer()
+                    logger.info(f"✅ FINAL DEAL CLOSED: {STATE['accepted_offer']}")
+
+                    await publish_negotiation_complete()
+                    return
             
             # 3. Advance state logically
             STATE["rounds"] += 1
@@ -392,7 +450,7 @@ Only call propose_offer when making a concrete counter-offer. You may speak with
             
             logger.info(f"🔄 ROUND {STATE['rounds']} completed. TURN {STATE['turns']}")
             await publish_timeline()
-            
+        logger.info(f"✅ FINAL DEAL CLOSED: {STATE['accepted_offer']}")
         await publish_negotiation_complete()
         logger.info("🏁 Negotiation loop finished. Alex entering idle state.")
         return
