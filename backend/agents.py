@@ -58,10 +58,10 @@ STATE = {
 # Agent with Tool
 # -------------------------------------------------
 class NegotiationAgent(Agent):
-    def __init__(self, instructions: str, agent_name: str, room_participant):
+    def __init__(self, instructions: str, agent_name: str):
         super().__init__(instructions=instructions)
         self.agent_name = agent_name
-        self.room_participant = room_participant
+        self.room_participant = None  # Assigned after session.start()
 
     @function_tool
     async def propose_offer(
@@ -82,8 +82,15 @@ class NegotiationAgent(Agent):
             "round": STATE.get("rounds", 0),
         }
 
+        # Track actual concessions (changed fields only) BEFORE overwriting STATE
+        prev = STATE["offers"].get(agent_label.lower())
+        if prev:
+            for k in ("price", "delivery_included", "transport_paid_by", "payment_terms"):
+                if prev.get(k) != offer.get(k):
+                    STATE["concessions"][agent_label.lower()].add(k)
+
+        # Now update STATE
         STATE["offers"][agent_label.lower()] = offer
-        STATE["concessions"][agent_label.lower()].update(offer.keys())
 
         logger.info(f"📦 [OFFER] {agent_label}: {offer}")
 
@@ -95,19 +102,6 @@ class NegotiationAgent(Agent):
                     "offer": offer,
                 }).encode()
             )
-            
-            # Resolve the future so the counterpart can proceed
-            future_key = "halima_offer_future" if agent_label == "Halima" else "alex_offer_future"
-            future = STATE.get(future_key)
-            if future and not future.done():
-                future.set_result(offer)
-            
-            # Track actual concessions (changed fields only)
-            prev = STATE["offers"].get(agent_label.lower())
-            if prev:
-                for k in ("price", "delivery_included", "transport_paid_by", "payment_terms"):
-                    if prev.get(k) != offer.get(k):
-                        STATE["concessions"][agent_label.lower()].add(k)
             
         except Exception as e:
             logger.error(f"❌ Failed to publish offer: {e}")
@@ -152,17 +146,10 @@ server.setup_fnc = prewarm
 # -------------------------------------------------
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
-    agent_name = ctx.job.agent_name
+    logger.info("Starting dual-agent negotiation")
 
-    # Resolve persona
-    if agent_name == "negotiation-worker" and ctx.job.metadata:
-        meta = json.loads(ctx.job.metadata)
-        agent_name = "juma-agent" if meta["persona"] == "Juma" else "alex-agent"
-
-    logger.info(f"Starting {agent_name}")
-
-    if agent_name == "juma-agent":
-        instructions = """You are Halima, a Kenyan farmer selling bulk maize.
+    # Define instructions for both agents
+    HALIMA_INSTRUCTIONS = """You are Halima, a Kenyan farmer selling bulk maize.
 Goal: Maximize total value.
 Negotiate using: price per kg (target $1.30), delivery inclusion, transport responsibility, and payment timing.
 Strategy: Concede occasionally but not repeatedly on the same dimension. 
@@ -171,8 +158,8 @@ If you are starting the negotiation, you must make an initial concrete offer.
 Only call propose_offer when making a concrete counter-offer. You may speak without making an offer.
 If the buyer meets your minimum acceptable terms, you should accept the deal.
 You are expected to vary price over the negotiation. Repeating the same price more than twice without justification is not acceptable."""
-    else:
-        instructions = """You are Alex, a professional commodity buyer.
+
+    ALEX_INSTRUCTIONS = """You are Alex, a professional commodity buyer.
 Goal: Minimize total landed cost and risk.
 Strategy: Evaluate offers holistically. You may accept higher prices if delivery or payment terms improve.
 Be concise and analytical. reject and explain why, or counter with a different bundle.
@@ -182,44 +169,62 @@ You are expected to vary price over the negotiation. Repeating the same price mo
 
     await ctx.connect()
 
-    session = AgentSession(
+    # Create two separate sessions
+    halima_session = AgentSession(
         stt=deepgram.STT(),
         llm=inference.LLM(model="openai/gpt-4o-mini"),
         tts=hume.TTS(
-            voice=hume.VoiceByName(
-                name="Kora" if agent_name == "juma-agent" else "Big Dicky",
-                provider="HUME_AI",
-            ),
+            voice=hume.VoiceByName(name="Kora", provider="HUME_AI"),
             instant_mode=True,
         ),
         vad=ctx.proc.userdata["vad"],
-        turn_detection=None,  # ✅ Manual turn control
     )
 
-    agent = NegotiationAgent(
-        instructions=instructions,
-        agent_name=agent_name,
-        room_participant=ctx.room.local_participant
-    )
-
-    await session.start(
-        agent=agent,
-        room=ctx.room,
-        room_options=room_io.RoomOptions(
-            close_on_disconnect=False
+    alex_session = AgentSession(
+        stt=deepgram.STT(),
+        llm=inference.LLM(model="openai/gpt-4o-mini"),
+        tts=hume.TTS(
+            voice=hume.VoiceByName(name="Big Dicky", provider="HUME_AI"),
+            instant_mode=True,
         ),
+        vad=ctx.proc.userdata["vad"],
     )
-    
 
-    STATE["sessions"][agent_name] = {
-        "session": session,
-        "agent": agent
-    }
+    # Create both agents (room_participant assigned after session start)
+    halima_agent = NegotiationAgent(
+        instructions=HALIMA_INSTRUCTIONS,
+        agent_name="juma-agent"
+    )
+    halima_agent.room_participant = ctx.room.local_participant
+
+    alex_agent = NegotiationAgent(
+        instructions=ALEX_INSTRUCTIONS,
+        agent_name="alex-agent"
+    )
+    alex_agent.room_participant = ctx.room.local_participant
+
+    # Start both sessions in the same room
+    await halima_session.start(
+        agent=halima_agent,
+        room=ctx.room,
+        room_options=room_io.RoomOptions(close_on_disconnect=False),
+    )
+
+    await alex_session.start(
+        agent=alex_agent,
+        room=ctx.room,
+        room_options=room_io.RoomOptions(close_on_disconnect=False),
+    )
+
+    # Store sessions in STATE
+    STATE["sessions"]["halima"] = {"session": halima_session, "agent": halima_agent}
+    STATE["sessions"]["alex"] = {"session": alex_session, "agent": alex_agent}
     STATE["accepted_offer"] = None
-    logger.info(f"Session & Agent ready: {agent_name}")
+    
+    logger.info("Both sessions started with correct participant attribution")
 
     # -------------------------------------------------
-    # ORCHESTRATION BRIDGE
+    # ORCHESTRATION HELPERS
     # -------------------------------------------------
     
     async def publish_timeline():
@@ -238,73 +243,6 @@ You are expected to vary price over the negotiation. Repeating the same price mo
             json.dumps({"type": "NEGOTIATION_COMPLETE"}).encode()
         )
 
-    # Data Sync Handler (Actor side + Alex Ack listener)
-    def on_data_received(payload: rtc.DataPacket, participant=None):
-        try:
-            # ⛔ Filter our own broadcasts (prevents duplicate triggers)
-            if participant and participant.identity == ctx.room.local_participant.identity:
-                return
-
-            data = json.loads(payload.data.decode())
-            
-            # 1. Halima Logic: Receive turn -> Speak -> Signal Done
-            if data.get("type") == "HALIMA_TURN" and agent_name == "juma-agent":
-                if STATE.get("shutting_down"):
-                    logger.warning("⛔ Skipping Halima reply: shutting down")
-                    return
-                
-                if STATE.get("halima_speaking"):
-                    logger.warning("⏳ Halima is already speaking/generating. Ignoring duplicate trigger.")
-                    return
-
-                logger.info("✅ Halima received HALIMA_TURN trigger")
-                STATE["halima_speaking"] = True
-
-                async def halima_reply_and_ack():
-                    try:
-                        if STATE.get("shutting_down"): 
-                            logger.warning("⛔ Halima task cancelled: shutting down")
-                            return
-
-                        # Generate reply and get a SpeechHandle
-                        handle = await session.generate_reply(
-                            instructions=data["instructions"],
-                            allow_interruptions=False,
-                        )
-                        
-
-                        # ✅ WAIT until speech AND all tool calls (propose_offer) finish
-                        await handle
-
-                        # ✅ ONLY NOW unblock Alex
-                        await ctx.room.local_participant.publish_data(
-                            json.dumps({"type": "HALIMA_DONE"}).encode()
-                        )
-
-                        logger.info("📤 Halima sent HALIMA_DONE")
-                    finally:
-                        STATE["halima_speaking"] = False
-
-                # Dispatch her turn
-                asyncio.create_task(halima_reply_and_ack())
-
-            # 2. Alex Logic: Receive Ack -> Store Context -> Unblock loop
-            if data.get("type") == "HALIMA_DONE" and agent_name == "alex-agent":
-                if "halima_done_future" in STATE and not STATE["halima_done_future"].done():
-                    STATE["halima_done_future"].set_result(True)
-
-            # 3. Actor Sync: Halima "hears" Alex
-            if data.get("type") == "ALEX_SPEECH" and agent_name == "juma-agent":
-                alex_text = data.get("text", "")
-                logger.info(f"📥 Halima heard Alex: {alex_text}")
-                if alex_text:
-                    STATE["last_alex_text"] = alex_text
-
-        except Exception as e:
-            logger.error(f"❌ Data handler error: {e}")
-
-    # Register room events
-    ctx.room.on("data_received", on_data_received)
 
     # -------------------------------------------------
     # THE NEGOTIATION LOOP (Master Logic)
@@ -318,27 +256,25 @@ You are expected to vary price over the negotiation. Repeating the same price mo
 
     async def run_negotiation():
         logger.info("🎮 Negotiation loop started")
-        if STATE.get("accepted_offer"):
-            return        
         
-        # Wait for both agents to be in the room and registered
-        while len(ctx.room.remote_participants) < 1 or len(STATE["sessions"]) < 2:
-            await asyncio.sleep(1)
-            logger.info(f"⏳ Alex waiting... (participants={len(ctx.room.remote_participants)}, agents={len(STATE['sessions'])})")
+        # Wait for room connection
+        while len(ctx.room.remote_participants) < 1:
+            await asyncio.sleep(0.5)
+            logger.info("⏳ Waiting for all participants...")
 
-        await publish_timeline() # 0/0
+        await publish_timeline()  # 0/0
         
         while STATE["rounds"] < STATE["max_rounds"] and not STATE.get("shutting_down"):
             # ✅ GUARD: Mid-round acceptance check
             if STATE.get("accepted_offer"):
-                return
+                break
 
-            logger.info(f"🏗️ ROUND {STATE['rounds'] + 1}")            
-            # Setup ack future
-            STATE["halima_done_future"] = asyncio.get_running_loop().create_future()
-            STATE["halima_offer_future"] = asyncio.get_running_loop().create_future()
+            logger.info(f"🏗️ ROUND {STATE['rounds'] + 1}")
 
-            # 1. Trigger Halima to speak
+            # ======================
+            # HALIMA'S TURN
+            # ======================
+            
             # Build Halima's context from structured state
             last_alex_offer = STATE["offers"]["alex"]
             last_alex_summary = (
@@ -347,7 +283,7 @@ You are expected to vary price over the negotiation. Repeating the same price mo
                 else "Alex has not made an offer yet."
             )
 
-            instr = f"""
+            halima_instr = f"""
             Alex status:
             {last_alex_summary}
 
@@ -366,82 +302,72 @@ You are expected to vary price over the negotiation. Repeating the same price mo
                 last_halima_offer and
                 STATE["rounds"] - last_halima_offer["round"] >= 2
             ):
-                instr += """
+                halima_instr += """
                 You have not changed your price recently.
                 You MUST adjust the price in this turn.
                 """
 
             if STATE["rounds"] == STATE["max_rounds"] - 1:
-                instr += """
+                halima_instr += """
                 This is the final round.
                 You must either accept, make a final offer, or clearly walk away.
                 Do not hedge or prolong the negotiation.
                 """
 
             if STATE["rounds"] == 0:
-                instr += """
+                halima_instr += """
                 You are starting the negotiation.
                 You MUST make an initial concrete offer now.
                 You MUST call propose_offer exactly once in this turn.
                 Do NOT describe prices, delivery, or payment terms unless you call the tool.
                 """
             else:
-                instr += """
+                halima_instr += """
                 Respond naturally.
                 Only call propose_offer if you are making a concrete counter-offer.
                 """
-            
-            await ctx.room.local_participant.publish_data(json.dumps({
-                "type": "HALIMA_TURN",
-                "instructions": instr
-            }).encode())
-            logger.info("✅ Halima turn triggered. Alex waiting for HALIMA_DONE...")
-            
-            # Yield to let Halima start first
-            await asyncio.sleep(0.2)
 
-            # Wait for Halima to finish queuing
-            try:
-                # ✅ Wait for Halima to finish SPEECH
-                await asyncio.wait_for(STATE["halima_done_future"], timeout=60.0)
+            logger.info("🎤 Halima speaking...")
+            h = await halima_session.generate_reply(
+                instructions=halima_instr,
+                allow_interruptions=False,
+            )
+            await h  # ✅ Halima finished speaking + tools
 
-                # ✅ Wait for Halima's OFFER (Logic Sync)
-                logger.info("⏳ Alex waiting for Halima's offer...")
-                halima_offer = STATE["offers"]["halima"]
+            # ✅ ALEX ACCEPTANCE GUARD
+            halima_offer = STATE["offers"]["halima"]
+            if halima_offer:
+                # Early acceptance guard: no deals before meaningful exchange
+                if STATE["rounds"] < 2:
+                    logger.info("⏳ Alex: Too early to accept, continuing negotiation...")
+                else:
+                    price = halima_offer["price"]
+                    delivery = halima_offer["delivery_included"]
+                    payment = halima_offer["payment_terms"]
 
-                # ✅ ALEX ACCEPTANCE GUARD
-                if halima_offer:
-                    # Early acceptance guard: no deals before meaningful exchange
-                    if STATE["rounds"] < 2:
-                        logger.info("⏳ Too early to accept, continuing negotiation...")
-                    else:
-                        price = halima_offer["price"]
-                        delivery = halima_offer["delivery_included"]
-                        payment = halima_offer["payment_terms"]
+                    if (
+                        halima_offer["round"] == STATE["rounds"] and
+                        price <= acceptable_price(STATE["rounds"], "buyer") and
+                        delivery and payment in ("7_days", "14_days")
+                    ):
+                        logger.info("✅ Alex accepts Halima's offer")
+                        # Let agent formulate acceptance naturally
+                        await alex_session.generate_reply(
+                            instructions="You agree with these terms. Accept the offer clearly and politely.",
+                            allow_interruptions=False,
+                        )
+                        STATE["accepted_offer"] = halima_offer
+                        await publish_negotiation_complete()
+                        break
 
-                        if (
-                            halima_offer["round"] == STATE["rounds"] and
-                            price <= acceptable_price(STATE["rounds"], "buyer") and
-                            delivery and payment in ("7_days", "14_days")
-                        ):
-                            logger.info("✅ Alex accepts Halima's offer")
-                            await agent.speak_acceptance(halima_offer, role="buyer")
-                            STATE["accepted_offer"] = halima_offer
-                            await publish_negotiation_complete()
-                            return
+            # ======================
+            # ALEX'S TURN
+            # ======================
 
-            except asyncio.TimeoutError:
-                logger.error("❌ Halima did not respond in time (60s timeout). Ending negotiation.")
-                STATE["shutting_down"] = True
+            if STATE.get("shutting_down") or STATE.get("accepted_offer"):
                 break
 
-            if STATE.get("shutting_down"): break
-
-            # halima_text = STATE.get("last_halima_text", "Halima is considering your offer.")                      
-
-            # 2. Alex speaks 
-            if STATE.get("shutting_down"): break
-            logger.info("🎤 Alex starts speaking turn...")
+            logger.info("🎤 Alex speaking...")
             
             alex_instr = f"""
             Halima just proposed this offer:
@@ -466,22 +392,19 @@ You are expected to vary price over the negotiation. Repeating the same price mo
                 You MUST adjust the price in this turn.
                 """
 
-            handle = await session.generate_reply(
+            a = await alex_session.generate_reply(
                 instructions=alex_instr,
                 allow_interruptions=False,
             )
+            await a  # ✅ Alex finished speaking + tools
 
-            # ✅ Wait for speech + tools to complete
-            await handle
-
-
-            # ✅ HALIMA ACCEPTANCE GUARD (Halima accepts Alex's offer)
+            # ✅ HAL IMA ACCEPTANCE GUARD (Halima accepts Alex's offer)
             alex_offer = STATE["offers"]["alex"]
 
             if alex_offer:
                 # Early acceptance guard: no deals before meaningful exchange
                 if STATE["rounds"] < 2:
-                    logger.info("⏳ Too early to accept, continuing negotiation...")
+                    logger.info("⏳ Halima: Too early to accept, continuing negotiation...")
                 else:
                     price = alex_offer["price"]
                     payment = alex_offer["payment_terms"]
@@ -495,30 +418,36 @@ You are expected to vary price over the negotiation. Repeating the same price mo
                         concessions_count > 1
                     ):
                         logger.info("✅ Halima accepts Alex's offer")
-                        await agent.speak_acceptance(alex_offer, role="seller")
+                        # Let agent formulate acceptance naturally
+                        await halima_session.generate_reply(
+                            instructions="You agree with these terms. Accept the offer clearly and politely.",
+                            allow_interruptions=False,
+                        )
                         STATE["accepted_offer"] = alex_offer
                         await publish_negotiation_complete()
-                        return
+                        break
             
-            # 3. Advance state logically
+            # 3. Advance state logically (each loop = 2 turns: Halima + Alex)
             STATE["rounds"] += 1
-            STATE["turns"] += 1
+            STATE["turns"] += 2
             
             logger.info(f"🔄 ROUND {STATE['rounds']} completed. TURN {STATE['turns']}")
             await publish_timeline()
+
+        # No deal closure message
         if not STATE["accepted_offer"]:
-            await session.generate_reply(
+            await halima_session.generate_reply(
                 instructions="It looks like we couldn't reach an agreement this time. Thank you for the discussion.",
                 allow_interruptions=False,
             )
 
-        logger.info(f"✅ FINAL DEAL CLOSED: {STATE['accepted_offer']}")
+        logger.info(f"✅ FINAL DEAL: {STATE['accepted_offer']}")
         await publish_negotiation_complete()
-        logger.info("🏁 Negotiation loop finished. Alex entering idle state.")
-        return
+        logger.info("🏁 Negotiation loop finished")
 
-    # Start the Master Loop ONLY if we are Alex
-    if agent_name == "alex-agent":
+    # ✅ Only Alex orchestrates
+    meta = json.loads(ctx.job.metadata or "{}")
+    if meta.get("persona") == "Alex":
         asyncio.create_task(run_negotiation())
 
     # Keep alive
