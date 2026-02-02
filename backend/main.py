@@ -15,7 +15,7 @@ if not load_dotenv():
 if not os.getenv("LIVEKIT_URL") and os.getenv("NEXT_PUBLIC_LIVEKIT_URL"):
     os.environ["LIVEKIT_URL"] = os.getenv("NEXT_PUBLIC_LIVEKIT_URL")
 
-app = FastAPI(title="EchoYield Backend")
+app = FastAPI(title="Harvest Backend")
 
 # Add CORS Middleware
 app.add_middleware(
@@ -28,7 +28,7 @@ app.add_middleware(
 
 @app.get("/")
 async def root():
-    return {"message": "EchoYield Backend API is running"}
+    return {"message": "Harvest Backend API is running"}
 
 @app.get("/hume/token")
 async def get_hume_token():
@@ -136,7 +136,7 @@ async def dispatch_agents(room_name: str = "BARN_ROOM_01"):
     client = api.LiveKitAPI(lk_url, api_key, api_secret)
 
     try:
-        # Dispatch Juma
+        # Dispatch Halima
         await client.agent_dispatch.create_dispatch(
             CreateAgentDispatchRequest(
                 room=room_name,
@@ -155,7 +155,7 @@ async def dispatch_agents(room_name: str = "BARN_ROOM_01"):
         )
 
         await client.aclose()
-        return {"status": "dispatched", "agents": ["juma-agent", "alex-agent"]}
+        return {"status": "dispatched", "agents": ["halima-agent", "alex-agent"]}
 
     except Exception as e:
         await client.aclose()
@@ -188,7 +188,7 @@ async def get_market_price(crop: str):
 async def get_strategy_hint(buyer_stress: float, buyer_urgency: float):
     """
     Tactical Empathy Orchestrator.
-    Determines if Juma should hold firm, flinch, or use silence.
+    Determines if Halima should hold firm, flinch, or use silence.
     """
     hint = "[ Alex sounds controlled. Hold your price. ]"
     
