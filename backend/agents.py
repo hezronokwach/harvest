@@ -50,6 +50,8 @@ STATE = {
         "halima": set(),
         "alex": set(),
     },
+    "halima_offer_future": None,
+    "alex_offer_future": None,
 }
 
 # -------------------------------------------------
@@ -95,6 +97,7 @@ class NegotiationAgent(Agent):
             "delivery_included": delivery_included,
             "transport_paid_by": transport_paid_by,
             "payment_terms": payment_terms,
+            "round": STATE.get("rounds", 0),
         }
 
         STATE["offers"][agent_label.lower()] = offer
@@ -110,14 +113,23 @@ class NegotiationAgent(Agent):
                     "offer": offer,
                 }).encode()
             )
+            
+            # Resolve the future so the counterpart can proceed
+            future_key = "halima_offer_future" if agent_label == "Halima" else "alex_offer_future"
+            future = STATE.get(future_key)
+            if future and not future.done():
+                future.set_result(offer)
+                
         except Exception as e:
             logger.error(f"❌ Failed to publish offer: {e}")
 
     @function_tool
     async def accept_offer(self) -> None:
         agent_label = "Halima" if "juma" in self.agent_name.lower() else "Alex"
+        
+        # Explicitly resolve the counterpart's offer from state
         offer = STATE["offers"]["alex" if agent_label == "Halima" else "halima"]
-
+        
         if not offer:
             return
 
@@ -130,6 +142,30 @@ class NegotiationAgent(Agent):
             "offer": offer,
         }).encode()
     )
+
+    async def speak_acceptance(self, offer: dict, role: str):
+        price = offer["price"]
+        delivery = "including delivery" if offer["delivery_included"] else "excluding delivery"
+        payment = offer["payment_terms"].replace("_", " ")
+
+        if role == "seller":
+            text = (
+                f"That works for me. I accept your offer at ${price:.2f} per kilogram, "
+                f"{delivery}, with payment in {payment}. "
+                "Thank you, I look forward to working together."
+            )
+        else:
+            text = (
+                f"Great, I accept your offer at ${price:.2f} per kilogram, "
+                f"{delivery}, with payment in {payment}. "
+                "We have a deal. Thank you."
+            )
+
+        # Force spoken reply
+        await self.session.generate_reply(
+            instructions=text,
+            allow_interruptions=False,
+        )
 
 # -------------------------------------------------
 # Server
@@ -158,7 +194,7 @@ async def entrypoint(ctx: JobContext):
     if agent_name == "juma-agent":
         instructions = """You are Halima, a Kenyan farmer selling bulk maize.
 Goal: Maximize total value.
-Negotiate using: price per kg (target $1.25), delivery inclusion, transport responsibility, and payment timing.
+Negotiate using: price per kg (target $1.30), delivery inclusion, transport responsibility, and payment timing.
 Strategy: Concede occasionally but not repeatedly on the same dimension. 
 Be warm and practical. Explain constraints (fertilizer, labor, cash flow) naturally without repeating the same reason twice.
 If you are starting the negotiation, you must make an initial concrete offer.
@@ -266,24 +302,15 @@ If an offer meets your target total cost and risk, you should accept it instead 
                         )
                         
 
-                        # Robust retry loop for transcription lag
-                        halima_text = ""
-                        for _ in range(8):   # up to ~1 second
-                            halima_text = agent.consume_spoken_text()
-                            if halima_text:
-                                break
-                            await asyncio.sleep(0.05)
+                        # ✅ WAIT until speech AND all tool calls (propose_offer) finish
+                        await handle
 
-                        if not halima_text:
-                            halima_text = "Let me outline an initial offer so we can move forward."
+                        # ✅ ONLY NOW unblock Alex
+                        await ctx.room.local_participant.publish_data(
+                            json.dumps({"type": "HALIMA_DONE"}).encode()
+                        )
 
-                        # Signal completion and SHARE TEXT to bridge context
-                        await ctx.room.local_participant.publish_data(json.dumps({
-                            "type": "HALIMA_DONE",
-                            "speaker": "Halima",
-                            "text": halima_text
-                        }).encode())
-                        logger.info(f"📤 Halima sent HALIMA_DONE with text: {halima_text}")
+                        logger.info("📤 Halima sent HALIMA_DONE")
                     finally:
                         STATE["halima_speaking"] = False
 
@@ -292,12 +319,6 @@ If an offer meets your target total cost and risk, you should accept it instead 
 
             # 2. Alex Logic: Receive Ack -> Store Context -> Unblock loop
             if data.get("type") == "HALIMA_DONE" and agent_name == "alex-agent":
-                halima_text = data.get("text", "")
-                logger.info(f"📩 Alex received Halima text: {halima_text}")
-                
-                if halima_text:
-                    STATE["last_halima_text"] = halima_text
-
                 if "halima_done_future" in STATE and not STATE["halima_done_future"].done():
                     STATE["halima_done_future"].set_result(True)
 
@@ -335,19 +356,30 @@ If an offer meets your target total cost and risk, you should accept it instead 
             logger.info(f"🏗️ ROUND {STATE['rounds'] + 1}")            
             # Setup ack future
             STATE["halima_done_future"] = asyncio.get_running_loop().create_future()
+            STATE["halima_offer_future"] = asyncio.get_running_loop().create_future()
 
             # 1. Trigger Halima to speak
             last_alex = STATE.get("last_alex_text", "Introductions phase.")
             
             instr = f"""
             Alex last said: "{last_alex}"
-
             Current offers:
             Halima: {STATE['offers']['halima']}
             Alex: {STATE['offers']['alex']}
-
-            Respond naturally.
             """
+
+            if STATE["rounds"] == 0:
+                instr += """
+                You are starting the negotiation.
+                You MUST make an initial concrete offer now.
+                You MUST call propose_offer exactly once in this turn.
+                Do NOT describe prices, delivery, or payment terms unless you call the tool.
+                """
+            else:
+                instr += """
+                Respond naturally.
+                Only call propose_offer if you are making a concrete counter-offer.
+                """
             
             await ctx.room.local_participant.publish_data(json.dumps({
                 "type": "HALIMA_TURN",
@@ -360,12 +392,14 @@ If an offer meets your target total cost and risk, you should accept it instead 
 
             # Wait for Halima to finish queuing
             try:
-                # ✅ Wait for Halima to finish
+                # ✅ Wait for Halima to finish SPEECH
                 await asyncio.wait_for(STATE["halima_done_future"], timeout=60.0)
 
-                # ✅ ALEX ACCEPTANCE GUARD
+                # ✅ Wait for Halima's OFFER (Logic Sync)
+                logger.info("⏳ Alex waiting for Halima's offer...")
                 halima_offer = STATE["offers"]["halima"]
 
+                # ✅ ALEX ACCEPTANCE GUARD
                 if halima_offer:
                     price = halima_offer["price"]
                     delivery = halima_offer["delivery_included"]
@@ -373,15 +407,19 @@ If an offer meets your target total cost and risk, you should accept it instead 
 
                     if price <= 1.20 and delivery and payment in ("7_days", "14_days"):
                         logger.info("✅ Alex accepts Halima's offer")
+                        
+                        STATE["accepted_offer"] = halima_offer
 
-                        await agent.accept_offer()
                         await session.generate_reply(
-                        instructions=(
-                            "Accept the offer clearly and explicitly. "
-                            "Confirm the agreed price, delivery, transport, and payment terms."
-                        ),
-                        allow_interruptions=False,
+                            instructions=(
+                                f"That sounds good. I accept your offer at ${halima_offer['price']:.2f} per kilogram, "
+                                f"{'including' if halima_offer['delivery_included'] else 'excluding'} delivery, "
+                                f"with payment in {halima_offer['payment_terms'].replace('_', ' ')}. "
+                                "We have a deal. Thank you."
+                            ),
+                            allow_interruptions=False,
                         )
+
                         await publish_negotiation_complete()
                         return
 
@@ -401,8 +439,13 @@ If an offer meets your target total cost and risk, you should accept it instead 
             alex_instr = f"""
             Halima just proposed this offer:
             {STATE['offers']['halima']}
+            
+            My last offer:
+            {STATE['offers']['alex']}
 
-            Respond naturally. If acceptable, accept it. Otherwise, counter or explain.
+            Speak naturally to Halima. Do not narrate your actions.
+            If accepting, say "That sounds good" and confirm terms.
+            If countering, just say the new terms.
             """
             handle = await session.generate_reply(
                 instructions=alex_instr,
@@ -418,7 +461,7 @@ If an offer meets your target total cost and risk, you should accept it instead 
                 await asyncio.sleep(0.05)
 
             if not alex_text:
-                alex_text = "I appreciate your offer. Let me review it."
+                alex_text = ""
                 
             STATE["last_alex_text"] = alex_text
 
@@ -435,19 +478,24 @@ If an offer meets your target total cost and risk, you should accept it instead 
             if alex_offer:
                 price = alex_offer["price"]
                 payment = alex_offer["payment_terms"]
+                concessions_count = len(STATE["concessions"]["alex"])
 
-                if price >= 1.20 and payment in ("7_days", "14_days"):
+                # Stricter thresholds: Force price >= 1.30 AND multiple concessions
+                if price >= 1.30 and payment in ("7_days", "14_days") and concessions_count > 1:
                     logger.info("✅ Halima accepts Alex's offer")
+                        
+                    STATE["accepted_offer"] = alex_offer
 
-                    await agent.accept_offer()
-                    logger.info(f"✅ FINAL DEAL CLOSED: {STATE['accepted_offer']}")
                     await session.generate_reply(
-                    instructions=(
-                        "Accept the buyer’s offer clearly and confirm the agreement. "
-                        "Restate the final terms briefly."
-                    ),
-                    allow_interruptions=False,
+                        instructions=(
+                            f"That works for me. I accept your offer at ${alex_offer['price']:.2f} per kilogram, "
+                            f"{'including' if alex_offer['delivery_included'] else 'excluding'} delivery, "
+                            f"with payment in {alex_offer['payment_terms'].replace('_', ' ')}. "
+                            "Thank you, I look forward to working together."
+                        ),
+                        allow_interruptions=False,
                     )
+
                     await publish_negotiation_complete()
                     return
             
