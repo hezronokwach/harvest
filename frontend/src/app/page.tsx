@@ -162,12 +162,28 @@ function DashboardContent({
   );
 
   const agentTracks = tracks.filter(t => t.participant.identity.startsWith("agent-"));
-  const [halimaTrack, alexTrack] = agentTracks;
 
-  // Create participant ID to agent name mapping
-  const participantToAgent = new Map<string, string>();
-  if (halimaTrack) participantToAgent.set(halimaTrack.participant.identity, "Halima");
-  if (alexTrack) participantToAgent.set(alexTrack.participant.identity, "Alex");
+  // Create stable participant ID to agent name mapping using useMemo
+  const participantToAgent = React.useMemo(() => {
+    const mapping = new Map<string, string>();
+
+    if (agentTracks.length >= 2) {
+      // First agent = Halima, Second agent = Alex
+      mapping.set(agentTracks[0].participant.identity, "Halima");
+      mapping.set(agentTracks[1].participant.identity, "Alex");
+
+      console.log("🗺️ Agent Mapping Created:", {
+        halima: agentTracks[0].participant.identity,
+        alex: agentTracks[1].participant.identity,
+      });
+    } else if (agentTracks.length === 1) {
+      // If only one agent, assume it's Halima (seller starts first)
+      mapping.set(agentTracks[0].participant.identity, "Halima");
+      console.log("🗺️ Partial Mapping (Halima only):", agentTracks[0].participant.identity);
+    }
+
+    return mapping;
+  }, [agentTracks.length, agentTracks[0]?.participant.identity, agentTracks[1]?.participant.identity]);
 
   useEffect(() => {
     if (!room) return;
@@ -237,6 +253,13 @@ function DashboardContent({
       // Use participant mapping to determine agent name
       const agentName = participantToAgent.get(participant.identity) || "Alex";
 
+      console.log("📝 Transcript from:", {
+        identity: participant.identity,
+        name: participant.name,
+        mappedTo: agentName,
+        mapSize: participantToAgent.size,
+      });
+
       const finalSegments = segments.filter(s => s.final && s.text.trim());
 
       if (finalSegments.length === 0) return;
@@ -272,6 +295,9 @@ function DashboardContent({
   useEffect(() => {
     console.warn("🔁 TIMELINE STATE CHANGED:", timeline);
   }, [timeline]);
+
+  const halimaTrack = agentTracks[0];
+  const alexTrack = agentTracks[1];
 
   const halimaOnline = Boolean(halimaTrack);
   const alexOnline = Boolean(alexTrack);
