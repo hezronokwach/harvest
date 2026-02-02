@@ -62,24 +62,6 @@ class NegotiationAgent(Agent):
         super().__init__(instructions=instructions)
         self.agent_name = agent_name
         self.room_participant = room_participant
-        self._spoken_buffer = []
-
-    # async def transcription_task(self):
-    #     """Official hook to capture agent's own speech from the session"""
-    #     while self.session is None:
-    #         await asyncio.sleep(0.05)
-            
-    #     async for segment in self.session.transcriptions():
-    #         if hasattr(segment, "text"):
-    #             self._spoken_buffer.append(segment.text)
-    #         else:
-    #             self._spoken_buffer.append(str(segment))
-
-    def consume_spoken_text(self) -> str:
-        """Clear the buffer and return the concatenated speech"""
-        text = " ".join(self._spoken_buffer).strip()
-        self._spoken_buffer.clear()
-        return text
 
     @function_tool
     async def propose_offer(
@@ -119,29 +101,17 @@ class NegotiationAgent(Agent):
             future = STATE.get(future_key)
             if future and not future.done():
                 future.set_result(offer)
-                
+            
+            # Track actual concessions (changed fields only)
+            prev = STATE["offers"].get(agent_label.lower())
+            if prev:
+                for k in ("price", "delivery_included", "transport_paid_by", "payment_terms"):
+                    if prev.get(k) != offer.get(k):
+                        STATE["concessions"][agent_label.lower()].add(k)
+            
         except Exception as e:
             logger.error(f"❌ Failed to publish offer: {e}")
 
-    @function_tool
-    async def accept_offer(self) -> None:
-        agent_label = "Halima" if "juma" in self.agent_name.lower() else "Alex"
-        
-        # Explicitly resolve the counterpart's offer from state
-        offer = STATE["offers"]["alex" if agent_label == "Halima" else "halima"]
-        
-        if not offer:
-            return
-
-        STATE["accepted_offer"] = offer
-
-        await self.room_participant.publish_data(
-            json.dumps({
-            "type": "OFFER_ACCEPTED",
-            "by": agent_label,
-            "offer": offer,
-        }).encode()
-    )
 
     async def speak_acceptance(self, offer: dict, role: str):
         price = offer["price"]
@@ -199,14 +169,16 @@ Strategy: Concede occasionally but not repeatedly on the same dimension.
 Be warm and practical. Explain constraints (fertilizer, labor, cash flow) naturally without repeating the same reason twice.
 If you are starting the negotiation, you must make an initial concrete offer.
 Only call propose_offer when making a concrete counter-offer. You may speak without making an offer.
-If the buyer meets your minimum acceptable terms, you should accept the deal."""
+If the buyer meets your minimum acceptable terms, you should accept the deal.
+You are expected to vary price over the negotiation. Repeating the same price more than twice without justification is not acceptable."""
     else:
         instructions = """You are Alex, a professional commodity buyer.
 Goal: Minimize total landed cost and risk.
 Strategy: Evaluate offers holistically. You may accept higher prices if delivery or payment terms improve.
 Be concise and analytical. reject and explain why, or counter with a different bundle.
 Only call propose_offer when making a concrete counter-offer. You may speak without making an offer.
-If an offer meets your target total cost and risk, you should accept it instead of continuing."""
+If an offer meets your target total cost and risk, you should accept it instead of continuing.
+You are expected to vary price over the negotiation. Repeating the same price more than twice without justification is not acceptable."""
 
     await ctx.connect()
 
@@ -238,7 +210,6 @@ If an offer meets your target total cost and risk, you should accept it instead 
         ),
     )
     
-    # asyncio.create_task(agent.transcription_task())
 
     STATE["sessions"][agent_name] = {
         "session": session,
@@ -338,6 +309,13 @@ If an offer meets your target total cost and risk, you should accept it instead 
     # -------------------------------------------------
     # THE NEGOTIATION LOOP (Master Logic)
     # -------------------------------------------------
+    def acceptable_price(round_num, role):
+        """Progressive price bands that narrow over rounds"""
+        if role == "seller":  # Halima
+            return 1.35 - (round_num * 0.02)  # slowly concedes
+        else:  # Alex
+            return 1.10 + (round_num * 0.03)  # slowly increases
+
     async def run_negotiation():
         logger.info("🎮 Negotiation loop started")
         if STATE.get("accepted_offer"):
@@ -351,22 +329,54 @@ If an offer meets your target total cost and risk, you should accept it instead 
         await publish_timeline() # 0/0
         
         while STATE["rounds"] < STATE["max_rounds"] and not STATE.get("shutting_down"):
+            # ✅ GUARD: Mid-round acceptance check
             if STATE.get("accepted_offer"):
                 return
+
             logger.info(f"🏗️ ROUND {STATE['rounds'] + 1}")            
             # Setup ack future
             STATE["halima_done_future"] = asyncio.get_running_loop().create_future()
             STATE["halima_offer_future"] = asyncio.get_running_loop().create_future()
 
             # 1. Trigger Halima to speak
-            last_alex = STATE.get("last_alex_text", "Introductions phase.")
-            
+            # Build Halima's context from structured state
+            last_alex_offer = STATE["offers"]["alex"]
+            last_alex_summary = (
+                f"Alex's last offer was {last_alex_offer}"
+                if last_alex_offer
+                else "Alex has not made an offer yet."
+            )
+
             instr = f"""
-            Alex last said: "{last_alex}"
+            Alex status:
+            {last_alex_summary}
+
             Current offers:
             Halima: {STATE['offers']['halima']}
             Alex: {STATE['offers']['alex']}
+
+            You are in round {STATE['rounds'] + 1} of {STATE['max_rounds']}.
+            As rounds progress, push toward closure.
+            If this is one of the final 2 rounds, prioritize either reaching agreement or clearly walking away.
             """
+
+            # Force price evolution if stale
+            last_halima_offer = STATE["offers"]["halima"]
+            if (
+                last_halima_offer and
+                STATE["rounds"] - last_halima_offer["round"] >= 2
+            ):
+                instr += """
+                You have not changed your price recently.
+                You MUST adjust the price in this turn.
+                """
+
+            if STATE["rounds"] == STATE["max_rounds"] - 1:
+                instr += """
+                This is the final round.
+                You must either accept, make a final offer, or clearly walk away.
+                Do not hedge or prolong the negotiation.
+                """
 
             if STATE["rounds"] == 0:
                 instr += """
@@ -401,27 +411,24 @@ If an offer meets your target total cost and risk, you should accept it instead 
 
                 # ✅ ALEX ACCEPTANCE GUARD
                 if halima_offer:
-                    price = halima_offer["price"]
-                    delivery = halima_offer["delivery_included"]
-                    payment = halima_offer["payment_terms"]
+                    # Early acceptance guard: no deals before meaningful exchange
+                    if STATE["rounds"] < 2:
+                        logger.info("⏳ Too early to accept, continuing negotiation...")
+                    else:
+                        price = halima_offer["price"]
+                        delivery = halima_offer["delivery_included"]
+                        payment = halima_offer["payment_terms"]
 
-                    if price <= 1.20 and delivery and payment in ("7_days", "14_days"):
-                        logger.info("✅ Alex accepts Halima's offer")
-                        
-                        STATE["accepted_offer"] = halima_offer
-
-                        await session.generate_reply(
-                            instructions=(
-                                f"That sounds good. I accept your offer at ${halima_offer['price']:.2f} per kilogram, "
-                                f"{'including' if halima_offer['delivery_included'] else 'excluding'} delivery, "
-                                f"with payment in {halima_offer['payment_terms'].replace('_', ' ')}. "
-                                "We have a deal. Thank you."
-                            ),
-                            allow_interruptions=False,
-                        )
-
-                        await publish_negotiation_complete()
-                        return
+                        if (
+                            halima_offer["round"] == STATE["rounds"] and
+                            price <= acceptable_price(STATE["rounds"], "buyer") and
+                            delivery and payment in ("7_days", "14_days")
+                        ):
+                            logger.info("✅ Alex accepts Halima's offer")
+                            await agent.speak_acceptance(halima_offer, role="buyer")
+                            STATE["accepted_offer"] = halima_offer
+                            await publish_negotiation_complete()
+                            return
 
             except asyncio.TimeoutError:
                 logger.error("❌ Halima did not respond in time (60s timeout). Ending negotiation.")
@@ -430,7 +437,7 @@ If an offer meets your target total cost and risk, you should accept it instead 
 
             if STATE.get("shutting_down"): break
 
-            halima_text = STATE.get("last_halima_text", "Halima is considering your offer.")                      
+            # halima_text = STATE.get("last_halima_text", "Halima is considering your offer.")                      
 
             # 2. Alex speaks 
             if STATE.get("shutting_down"): break
@@ -447,64 +454,64 @@ If an offer meets your target total cost and risk, you should accept it instead 
             If accepting, say "That sounds good" and confirm terms.
             If countering, just say the new terms.
             """
+
+            # Force price evolution if stale
+            last_alex_offer = STATE["offers"]["alex"]
+            if (
+                last_alex_offer and
+                STATE["rounds"] - last_alex_offer["round"] >= 2
+            ):
+                alex_instr += """
+                You have not changed your price recently.
+                You MUST adjust the price in this turn.
+                """
+
             handle = await session.generate_reply(
                 instructions=alex_instr,
                 allow_interruptions=False,
             )
 
-            # Robust retry loop for transcription lag
-            alex_text = ""
-            for _ in range(8):
-                alex_text = agent.consume_spoken_text()
-                if alex_text:
-                    break
-                await asyncio.sleep(0.05)
+            # ✅ Wait for speech + tools to complete
+            await handle
 
-            if not alex_text:
-                alex_text = ""
-                
-            STATE["last_alex_text"] = alex_text
-
-            # Broadcast Alex's text so Halima can "hear" it
-            await ctx.room.local_participant.publish_data(json.dumps({
-                "type": "ALEX_SPEECH",
-                "speaker": "Alex",
-                "text": alex_text
-            }).encode())
 
             # ✅ HALIMA ACCEPTANCE GUARD (Halima accepts Alex's offer)
             alex_offer = STATE["offers"]["alex"]
 
             if alex_offer:
-                price = alex_offer["price"]
-                payment = alex_offer["payment_terms"]
-                concessions_count = len(STATE["concessions"]["alex"])
+                # Early acceptance guard: no deals before meaningful exchange
+                if STATE["rounds"] < 2:
+                    logger.info("⏳ Too early to accept, continuing negotiation...")
+                else:
+                    price = alex_offer["price"]
+                    payment = alex_offer["payment_terms"]
+                    concessions_count = len(STATE["concessions"]["alex"])
 
-                # Stricter thresholds: Force price >= 1.30 AND multiple concessions
-                if price >= 1.30 and payment in ("7_days", "14_days") and concessions_count > 1:
-                    logger.info("✅ Halima accepts Alex's offer")
-                        
-                    STATE["accepted_offer"] = alex_offer
-
-                    await session.generate_reply(
-                        instructions=(
-                            f"That works for me. I accept your offer at ${alex_offer['price']:.2f} per kilogram, "
-                            f"{'including' if alex_offer['delivery_included'] else 'excluding'} delivery, "
-                            f"with payment in {alex_offer['payment_terms'].replace('_', ' ')}. "
-                            "Thank you, I look forward to working together."
-                        ),
-                        allow_interruptions=False,
-                    )
-
-                    await publish_negotiation_complete()
-                    return
+                    # Stricter thresholds: Force price >= dynamic threshold AND multiple concessions
+                    if (
+                        alex_offer["round"] == STATE["rounds"] and
+                        price >= acceptable_price(STATE["rounds"], "seller") and
+                        payment in ("7_days", "14_days") and
+                        concessions_count > 1
+                    ):
+                        logger.info("✅ Halima accepts Alex's offer")
+                        await agent.speak_acceptance(alex_offer, role="seller")
+                        STATE["accepted_offer"] = alex_offer
+                        await publish_negotiation_complete()
+                        return
             
             # 3. Advance state logically
             STATE["rounds"] += 1
-            STATE["turns"] = STATE["rounds"] * 2
+            STATE["turns"] += 1
             
             logger.info(f"🔄 ROUND {STATE['rounds']} completed. TURN {STATE['turns']}")
             await publish_timeline()
+        if not STATE["accepted_offer"]:
+            await session.generate_reply(
+                instructions="It looks like we couldn't reach an agreement this time. Thank you for the discussion.",
+                allow_interruptions=False,
+            )
+
         logger.info(f"✅ FINAL DEAL CLOSED: {STATE['accepted_offer']}")
         await publish_negotiation_complete()
         logger.info("🏁 Negotiation loop finished. Alex entering idle state.")
