@@ -62,16 +62,16 @@ class NegotiationAgent(Agent):
         self.room_participant = room_participant
         self._spoken_buffer = []
 
-    async def transcription_task(self):
-        """Official hook to capture agent's own speech from the session"""
-        while self.session is None:
-            await asyncio.sleep(0.05)
+    # async def transcription_task(self):
+    #     """Official hook to capture agent's own speech from the session"""
+    #     while self.session is None:
+    #         await asyncio.sleep(0.05)
             
-        async for segment in self.session.transcriptions():
-            if hasattr(segment, "text"):
-                self._spoken_buffer.append(segment.text)
-            else:
-                self._spoken_buffer.append(str(segment))
+    #     async for segment in self.session.transcriptions():
+    #         if hasattr(segment, "text"):
+    #             self._spoken_buffer.append(segment.text)
+    #         else:
+    #             self._spoken_buffer.append(str(segment))
 
     def consume_spoken_text(self) -> str:
         """Clear the buffer and return the concatenated speech"""
@@ -202,7 +202,7 @@ If an offer meets your target total cost and risk, you should accept it instead 
         ),
     )
     
-    asyncio.create_task(agent.transcription_task())
+    # asyncio.create_task(agent.transcription_task())
 
     STATE["sessions"][agent_name] = {
         "session": session,
@@ -340,15 +340,13 @@ If an offer meets your target total cost and risk, you should accept it instead 
             last_alex = STATE.get("last_alex_text", "Introductions phase.")
             
             instr = f"""
-            Context:
             Alex last said: "{last_alex}"
 
-            Last offers:
-            Halima: {STATE["offers"]["halima"]}
-            Alex: {STATE["offers"]["alex"]}
+            Current offers:
+            Halima: {STATE['offers']['halima']}
+            Alex: {STATE['offers']['alex']}
 
-            If no offer has been made yet, make a concrete opening offer.
-            Otherwise, continue the negotiation naturally.
+            Respond naturally.
             """
             
             await ctx.room.local_participant.publish_data(json.dumps({
@@ -377,6 +375,13 @@ If an offer meets your target total cost and risk, you should accept it instead 
                         logger.info("✅ Alex accepts Halima's offer")
 
                         await agent.accept_offer()
+                        await session.generate_reply(
+                        instructions=(
+                            "Accept the offer clearly and explicitly. "
+                            "Confirm the agreed price, delivery, transport, and payment terms."
+                        ),
+                        allow_interruptions=False,
+                        )
                         await publish_negotiation_complete()
                         return
 
@@ -394,14 +399,10 @@ If an offer meets your target total cost and risk, you should accept it instead 
             logger.info("🎤 Alex starts speaking turn...")
             
             alex_instr = f"""
-            Context:
-            Halima last said: "{halima_text}"
+            Halima just proposed this offer:
+            {STATE['offers']['halima']}
 
-            Last offers:
-            Halima: {STATE["offers"]["halima"]}
-            Alex: {STATE["offers"]["alex"]}
-
-            Continue the negotiation naturally.
+            Respond naturally. If acceptable, accept it. Otherwise, counter or explain.
             """
             handle = await session.generate_reply(
                 instructions=alex_instr,
@@ -440,7 +441,13 @@ If an offer meets your target total cost and risk, you should accept it instead 
 
                     await agent.accept_offer()
                     logger.info(f"✅ FINAL DEAL CLOSED: {STATE['accepted_offer']}")
-
+                    await session.generate_reply(
+                    instructions=(
+                        "Accept the buyer’s offer clearly and confirm the agreement. "
+                        "Restate the final terms briefly."
+                    ),
+                    allow_interruptions=False,
+                    )
                     await publish_negotiation_complete()
                     return
             
