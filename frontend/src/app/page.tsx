@@ -155,6 +155,20 @@ function DashboardContent({
 }) {
   const room = useRoomContext();
 
+  // Track-based role mapping for agents (LiveKit agent IDs are randomized)
+  const tracks = useTracks(
+    [{ source: Track.Source.Microphone, withPlaceholder: false }],
+    { onlySubscribed: true }
+  );
+
+  const agentTracks = tracks.filter(t => t.participant.identity.startsWith("agent-"));
+  const [halimaTrack, alexTrack] = agentTracks;
+
+  // Create participant ID to agent name mapping
+  const participantToAgent = new Map<string, string>();
+  if (halimaTrack) participantToAgent.set(halimaTrack.participant.identity, "Halima");
+  if (alexTrack) participantToAgent.set(alexTrack.participant.identity, "Alex");
+
   useEffect(() => {
     if (!room) return;
 
@@ -177,7 +191,7 @@ function DashboardContent({
       // For other messages, derive from participant
       const agentName = data.type === "price_update"
         ? data.agent
-        : (participant?.name || (participant?.identity.includes("halima") || participant?.identity.includes("juma") ? "Halima" : "Alex"));
+        : (participant?.name || (participant?.identity.includes("halima") || participant?.identity.includes("juma") || participant?.name?.toLowerCase().includes("halima") ? "Halima" : "Alex"));
 
       if (data.type === "thought") {
         const id = `${agentName}-${crypto.randomUUID()}`;
@@ -220,11 +234,8 @@ function DashboardContent({
     ) => {
       if (!participant) return;
 
-      const agentName =
-        participant.identity.includes("halima") ||
-          participant.identity.includes("juma")
-          ? "Halima"
-          : "Alex";
+      // Use participant mapping to determine agent name
+      const agentName = participantToAgent.get(participant.identity) || "Alex";
 
       const finalSegments = segments.filter(s => s.final && s.text.trim());
 
@@ -256,20 +267,11 @@ function DashboardContent({
       room.off(RoomEvent.DataReceived, onDataReceived);
       room.off(RoomEvent.TranscriptionReceived, handleTranscription);
     };
-  }, [room, setThoughts, setTranscripts, setTimeline, setNegotiationProgress, timeline]);
+  }, [room, setThoughts, setTranscripts, setTimeline, setNegotiationProgress, timeline, participantToAgent]);
 
   useEffect(() => {
     console.warn("🔁 TIMELINE STATE CHANGED:", timeline);
   }, [timeline]);
-
-  // Track-based role mapping for agents (LiveKit agent IDs are randomized)
-  const tracks = useTracks(
-    [{ source: Track.Source.Microphone, withPlaceholder: false }],
-    { onlySubscribed: true }
-  );
-
-  const agentTracks = tracks.filter(t => t.participant.identity.startsWith("agent-"));
-  const [halimaTrack, alexTrack] = agentTracks;
 
   const halimaOnline = Boolean(halimaTrack);
   const alexOnline = Boolean(alexTrack);
