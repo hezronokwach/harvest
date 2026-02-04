@@ -642,26 +642,59 @@ function DashboardContent({
     <div className="max-w-7xl mx-auto">
       {/* Incoming Call Modal (Ringing) */}
       {callState === "ringing" && incomingCallFrom && (
-        <div className="fixed inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-sm">
-          <div className="bg-gray-900 p-10 rounded-2xl text-center border border-orange-500/30 shadow-2xl max-w-md">
-            <div className="w-24 h-24 bg-orange-500 rounded-full mx-auto mb-6 animate-pulse flex items-center justify-center">
-              <span className="text-4xl">📞</span>
-            </div>
-            <h2 className="text-3xl font-black mb-3 text-orange-500">Incoming Call</h2>
-            <p className="text-gray-300 mb-8 text-lg">{incomingCallFrom} is calling...</p>
+        <div className="fixed inset-0 bg-gradient-to-b from-black/98 via-orange-950/30 to-black/98 flex items-center justify-center z-50 backdrop-blur-2xl">
+          {/* Floating Background Orbs */}
+          <div className="absolute inset-0 pointer-events-none overflow-hidden">
+            <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-orange-500/20 rounded-full blur-3xl animate-float animate-glow-pulse" />
+            <div className="absolute bottom-1/4 right-1/4 w-64 h-64 bg-red-500/20 rounded-full blur-3xl animate-float animate-glow-pulse" style={{ animationDelay: '1.5s' }} />
+          </div>
 
-            <div className="flex gap-4 justify-center">
+          <div className="relative text-center opacity-0 animate-fade-in-scale">
+            {/* Premium Icon */}
+            <div className="relative w-48 h-48 mx-auto mb-12">
+              {/* Outer rotating ring */}
+              <div className="absolute inset-0 rounded-full border-2 border-orange-500/20 animate-spin" style={{ animationDuration: '8s' }} />
+              <div className="absolute inset-4 rounded-full border-2 border-orange-500/30 animate-spin" style={{ animationDuration: '6s', animationDirection: 'reverse' }} />
+
+              {/* Glow layers */}
+              <div className="absolute inset-0 bg-orange-500/10 rounded-full blur-3xl animate-glow-pulse" />
+              <div className="absolute inset-8 bg-orange-500/20 rounded-full blur-2xl animate-glow-pulse" style={{ animationDelay: '0.5s' }} />
+
+              {/* Center icon */}
+              <div className="absolute inset-12 bg-gradient-to-br from-orange-400 via-orange-500 to-orange-600 rounded-full flex items-center justify-center shadow-2xl shadow-orange-500/50 animate-pulse">
+                <svg className="w-16 h-16 text-white" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 00-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 3 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z" />
+                </svg>
+              </div>
+            </div>
+
+            {/* Title */}
+            <h2 className="text-5xl font-black mb-4 bg-gradient-to-r from-orange-300 via-orange-400 to-orange-600 bg-clip-text text-transparent tracking-tight">
+              Incoming Call
+            </h2>
+
+            {/* Caller Info */}
+            <p className="text-white mb-2 text-2xl font-bold">{incomingCallFrom}</p>
+            <p className="text-orange-400/60 mb-16 text-xs uppercase tracking-[0.3em] font-bold">is calling...</p>
+
+            {/* Action Buttons */}
+            <div className="flex gap-6 justify-center">
               <button
                 onClick={declineCall}
-                className="px-8 py-4 bg-red-500 hover:bg-red-600 rounded-xl font-bold text-lg transition-all hover:scale-105"
+                className="group relative px-12 py-5 bg-red-500/10 border-2 border-red-500/30 rounded-2xl hover:scale-105 active:scale-95 transition-all duration-300 overflow-hidden backdrop-blur-sm hover:border-red-500/60"
               >
-                Decline
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-red-500/20 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+                <span className="relative z-10 text-red-400 font-black uppercase tracking-wider">Decline</span>
+                <div className="absolute -inset-3 bg-red-500/30 blur-2xl opacity-0 group-hover:opacity-100 transition-opacity -z-10" />
               </button>
+
               <button
                 onClick={acceptCall}
-                className="px-8 py-4 bg-green-500 hover:bg-green-600 rounded-xl font-bold text-lg transition-all hover:scale-105"
+                className="group relative px-12 py-5 bg-gradient-to-br from-green-500 to-emerald-600 rounded-2xl hover:scale-105 active:scale-95 transition-all duration-300 overflow-hidden shadow-2xl shadow-green-500/40"
               >
-                Accept
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+                <span className="relative z-10 text-white font-black uppercase tracking-wider">Accept</span>
+                <div className="absolute -inset-3 bg-green-500/50 blur-2xl opacity-0 group-hover:opacity-100 transition-opacity -z-10" />
               </button>
             </div>
           </div>
@@ -670,22 +703,52 @@ function DashboardContent({
 
       {/* Outgoing Call Modal (Calling) */}
       {callState === "calling" && outgoingCallTo && (
-        <div className="fixed inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-sm">
-          <div className="bg-gray-900 p-10 rounded-2xl text-center border border-blue-500/30 shadow-2xl max-w-md">
-            <div className="w-24 h-24 bg-blue-500 rounded-full mx-auto mb-6 animate-ping flex items-center justify-center">
-              <span className="text-4xl">📱</span>
-            </div>
-            <h2 className="text-3xl font-black mb-3 text-blue-500">Calling...</h2>
-            <p className="text-gray-300 mb-8 text-lg">{outgoingCallTo}</p>
+        <div className="fixed inset-0 bg-gradient-to-b from-black/98 via-blue-950/30 to-black/98 flex items-center justify-center z-50 backdrop-blur-2xl">
+          {/* Floating Background Orbs */}
+          <div className="absolute inset-0 pointer-events-none overflow-hidden">
+            <div className="absolute top-1/4 right-1/4 w-96 h-96 bg-blue-500/20 rounded-full blur-3xl animate-float animate-glow-pulse" />
+            <div className="absolute bottom-1/4 left-1/4 w-64 h-64 bg-cyan-500/20 rounded-full blur-3xl animate-float animate-glow-pulse" style={{ animationDelay: '1.5s' }} />
+          </div>
 
+          <div className="relative text-center opacity-0 animate-fade-in-scale">
+            {/* Premium Icon */}
+            <div className="relative w-48 h-48 mx-auto mb-12">
+              {/* Outer rotating ring */}
+              <div className="absolute inset-0 rounded-full border-2 border-blue-500/20 animate-spin" style={{ animationDuration: '8s' }} />
+              <div className="absolute inset-4 rounded-full border-2 border-blue-500/30 animate-spin" style={{ animationDuration: '6s', animationDirection: 'reverse' }} />
+
+              {/* Glow layers */}
+              <div className="absolute inset-0 bg-blue-500/10 rounded-full blur-3xl animate-glow-pulse" />
+              <div className="absolute inset-8 bg-blue-500/20 rounded-full blur-2xl animate-glow-pulse" style={{ animationDelay: '0.5s' }} />
+
+              {/* Center icon with ping animation */}
+              <div className="absolute inset-12 bg-gradient-to-br from-blue-400 via-blue-500 to-blue-600 rounded-full flex items-center justify-center shadow-2xl shadow-blue-500/50 animate-pulse">
+                <svg className="w-16 h-16 text-white" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M17 1.01L7 1c-1.1 0-2 .9-2 2v18c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V3c0-1.1-.9-1.99-2-1.99zM17 19H7V5h10v14z" />
+                </svg>
+              </div>
+            </div>
+
+            {/* Title */}
+            <h2 className="text-5xl font-black mb-4 bg-gradient-to-r from-blue-300 via-blue-400 to-blue-600 bg-clip-text text-transparent tracking-tight">
+              Calling...
+            </h2>
+
+            {/* Recipient Info */}
+            <p className="text-white mb-2 text-2xl font-bold">{outgoingCallTo}</p>
+            <p className="text-blue-400/60 mb-16 text-xs uppercase tracking-[0.3em] font-bold">Connecting...</p>
+
+            {/* Cancel Button */}
             <button
               onClick={() => {
                 setCallState("idle");
                 setOutgoingCallTo(null);
               }}
-              className="px-8 py-4 bg-red-500 hover:bg-red-600 rounded-xl font-bold text-lg transition-all hover:scale-105"
+              className="group relative px-14 py-5 bg-red-500/10 border-2 border-red-500/30 rounded-2xl hover:scale-105 active:scale-95 transition-all duration-300 overflow-hidden backdrop-blur-sm hover:border-red-500/60"
             >
-              Cancel
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-red-500/20 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+              <span className="relative z-10 text-red-400 font-black uppercase tracking-wider">Cancel Call</span>
+              <div className="absolute -inset-3 bg-red-500/30 blur-2xl opacity-0 group-hover:opacity-100 transition-opacity -z-10" />
             </button>
           </div>
         </div>
