@@ -643,11 +643,9 @@ function DashboardContent({
         </div>
       )}
 
-      <div className="mb-4 p-3 bg-red-900/80 text-white font-mono text-[10px] border border-red-500 rounded flex justify-between items-center backdrop-blur-sm">
-      </div>
       <div className="flex justify-between items-center mb-12 border-b border-white/5 pb-8">
+        {/* Persona Header */}
         <div>
-          {/* Persona Header */}
           <div className="flex items-center gap-3 mb-2">
             <div className={`w-3 h-3 rounded-full ${persona === "Halima" ? "bg-orange-500" : "bg-blue-500"} animate-pulse`}></div>
             <h1 className="text-3xl font-black tracking-tighter uppercase italic">
@@ -658,38 +656,40 @@ function DashboardContent({
           </div>
           <p className="text-gray-500 text-xs mt-1 uppercase tracking-widest">Farmer&apos;s Strategic Negotiation Hub</p>
         </div>
-        <div className="flex gap-6 items-center">
+
+        {/* Call UI Block */}
+        <div className="relative p-4 rounded-2xl border border-white/10 shadow-2xl backdrop-blur-md bg-white/5 flex items-center gap-6">
           <button
             onClick={initiateCall}
             disabled={callState !== "idle"}
-            className={`px-6 py-3 ${callState === "idle" ? "bg-orange-500 hover:bg-orange-600" : "bg-gray-600 cursor-not-allowed"} border border-orange-400 rounded-xl text-xs text-black font-black uppercase tracking-widest transition-all hover:scale-105 active:scale-95 shadow-[0_0_20px_rgba(249,115,22,0.3)]`}
+            className={`relative px-6 py-3 rounded-xl text-xs text-white font-black uppercase tracking-widest overflow-hidden transition-all duration-300
+                        ${callState === "idle"
+                ? "bg-gradient-to-r from-orange-500 to-red-500 hover:from-orange-600 hover:to-red-600 shadow-[0_0_20px_rgba(249,115,22,0.3)] active:scale-95"
+                : "bg-gray-700 cursor-not-allowed opacity-70"
+              }`}
           >
-            📞 Call {persona === "Halima" ? "Alex" : "Halima"}
+            <span className="relative z-10">📞 Call {persona === "Halima" ? "Alex" : "Halima"}</span>
+            {callState === "idle" && (
+              <span className="absolute inset-0 w-full h-full bg-gradient-to-r from-orange-500 to-red-500 opacity-0 hover:opacity-100 transition-opacity duration-300"></span>
+            )}
           </button>
-          <div className="flex gap-4 pr-6 border-r border-white/10 items-center">
+
+          {/* Status Dots */}
+          <div className="flex gap-4 items-center pr-6 border-r border-white/10">
             <div className="flex items-center gap-2">
               <div
-                className={`w-3 h-3 rounded-full transition-all duration-300 ${halimaOnline
-                  ? `bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.6)] ${halimaSpeaking ? "animate-pulse scale-150" : "animate-ping"}`
-                  : "bg-red-500"
-                  }`}
+                className={`w-3 h-3 rounded-full transition-all duration-300 ${halimaOnline ? "bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.6)]" + (halimaSpeaking ? " animate-pulse scale-150" : " animate-ping") : "bg-red-500"}`}
               />
-              <span className={`text-[10px] font-mono uppercase transition-colors ${halimaOnline ? "text-gray-300" : "text-gray-600"}`}>
-                HALIMA: {halimaStatus}
-              </span>
+              <span className={`text-[10px] font-mono uppercase transition-colors ${halimaOnline ? "text-gray-300" : "text-gray-600"}`}>HALIMA: {halimaStatus}</span>
             </div>
             <div className="flex items-center gap-2">
               <div
-                className={`w-3 h-3 rounded-full transition-all duration-300 ${alexOnline
-                  ? `bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.6)] ${alexSpeaking ? "animate-pulse scale-150" : "animate-ping"}`
-                  : "bg-red-500"
-                  }`}
+                className={`w-3 h-3 rounded-full transition-all duration-300 ${alexOnline ? "bg-green-500 shadow-[0_0_12px_rgba(34,197,94,0.6)]" + (alexSpeaking ? " animate-pulse scale-150" : " animate-ping") : "bg-red-500"}`}
               />
-              <span className={`text-[10px] font-mono uppercase transition-colors ${alexOnline ? "text-gray-300" : "text-gray-600"}`}>
-                ALEX: {alexStatus}
-              </span>
+              <span className={`text-[10px] font-mono uppercase transition-colors ${alexOnline ? "text-gray-300" : "text-gray-600"}`}>ALEX: {alexStatus}</span>
             </div>
           </div>
+
           <div className="text-right">
             <p className="text-[10px] text-gray-600 uppercase">LiveKit Room</p>
             <p className="text-xs font-mono text-green-500 flex items-center gap-1.5">
