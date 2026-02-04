@@ -113,8 +113,15 @@ NEGOTIATION RULES:
         ),
     )
 
-    # If Halima joins a CALL room (not presence), she should initiate
-    if persona == "Halima" and "call-" in ctx.room.name:
+    # Only one agent should proactively speak; the other must wait for a user turn.
+    # This is the recommended pattern from LiveKit to prevent both agents from speaking simultaneously.
+    is_initiator = persona == "Halima"
+
+    if is_initiator and "call-" in ctx.room.name:
+        # Wait a moment for other participants to join
+        await asyncio.sleep(2)
+        
+        logger.info(f"{persona} is the initiator, making opening offer")
         await session.generate_reply(
             instructions="Introduce yourself briefly and make your opening offer of $1.25/kg.",
             allow_interruptions=False,

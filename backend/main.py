@@ -6,25 +6,27 @@ from pathlib import Path
 from livekit import api
 from livekit.api import CreateAgentDispatchRequest
 
+import os
+from dotenv import load_dotenv
 
-if not load_dotenv():
-    # If that fails or file missing, try parent dir
-    env_path = Path(__file__).parent.parent / ".env"
-    load_dotenv(dotenv_path=env_path)
+load_dotenv()
 
 if not os.getenv("LIVEKIT_URL") and os.getenv("NEXT_PUBLIC_LIVEKIT_URL"):
     os.environ["LIVEKIT_URL"] = os.getenv("NEXT_PUBLIC_LIVEKIT_URL")
 
 app = FastAPI(title="Harvest Backend")
 
-# Add CORS Middleware
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, replace with specific origins
+    allow_origins=["*"],  # In production, specify exact origins
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Idempotency guard for active calls
+active_calls = set()
 
 @app.get("/")
 async def root():
@@ -74,20 +76,13 @@ async def get_livekit_token(participant_name: str, persona: str = "Halima", room
     if not room_name:
         room_name = f"presence-{persona.lower()}"
 
+    # Presence rooms are UI-only, no agents dispatched here
     token = api.AccessToken(api_key, api_secret) \
         .with_identity(f"user-{persona.lower()}") \
         .with_name(participant_name) \
         .with_grants(api.VideoGrants(
             room_join=True,
             room=room_name,
-        )) \
-        .with_room_config(api.RoomConfiguration(
-            agents=[
-                api.RoomAgentDispatch(
-                    agent_name="negotiation-worker",
-                    metadata=f'{{"role": "{"seller" if persona == "Halima" else "buyer"}", "persona": "{persona}"}}'
-                )
-            ]
         ))
 
     return {"token": token.to_jwt(), "room": room_name}
@@ -95,15 +90,27 @@ async def get_livekit_token(participant_name: str, persona: str = "Halima", room
 @app.post("/negotiation/call")
 async def start_call(room_name: str):
     """
-    Bridges Halima and Alex into a specific shared call room.
+    Initiates a negotiation call by dispatching both agents into a shared call room.
+    Idempotent - prevents duplicate dispatch on repeated clicks.
     """
+    # Idempotency check
+    if room_name in active_calls:
+        return {
+            "status": "already_running",
+            "room": room_name,
+            "message": "Call already in progress"
+        }
+    
+    active_calls.add(room_name)
+    
     api_key = os.getenv("LIVEKIT_API_KEY")
     api_secret = os.getenv("LIVEKIT_API_SECRET")
     lk_url = os.getenv("LIVEKIT_URL")
-
+    
     if not api_key or not api_secret or not lk_url:
+        active_calls.discard(room_name)
         raise HTTPException(status_code=500, detail="LiveKit credentials not configured")
-
+    
     client = api.LiveKitAPI(lk_url, api_key, api_secret)
     
     try:
@@ -136,8 +143,21 @@ async def start_call(room_name: str):
         }
 
     except Exception as e:
+        active_calls.discard(room_name)  # Remove from active calls on error
         await client.aclose()
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/negotiation/end")
+async def end_call(room_name: str):
+    """
+    Ends a negotiation call and removes it from active calls.
+    This allows the room to be reused for future calls.
+    """
+    active_calls.discard(room_name)
+    return {
+        "status": "call_ended",
+        "room": room_name
+    }
 
 @app.get("/market-price/{crop}")
 async def get_market_price(crop: str):
