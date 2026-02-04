@@ -53,6 +53,15 @@ export default function Home() {
   const [transcripts, setTranscripts] = useState<Array<{ id: string; agent: string; text: string }>>([]);
   const [callStatus, setCallStatus] = useState<string>("");
 
+  // Call signaling states
+  const [callState, setCallState] = useState<"idle" | "calling" | "ringing" | "connected">("idle");
+  const [incomingCallFrom, setIncomingCallFrom] = useState<string | null>(null);
+  const [outgoingCallTo, setOutgoingCallTo] = useState<string | null>(null);
+
+  // Cross-persona online status
+  const [halimaOnlineState, setHalimaOnlineState] = useState(false);
+  const [alexOnlineState, setAlexOnlineState] = useState(false);
+
 
   useEffect(() => {
     const timer = setTimeout(() => setHasMounted(true), 0);
@@ -64,6 +73,32 @@ export default function Home() {
       orange: [...Array(20)].map(() => Math.random() * 60 + 20),
       blue: [...Array(20)].map(() => Math.random() * 60 + 20)
     });
+  }, []);
+
+  // Poll persona status
+  useEffect(() => {
+    const checkStatus = async () => {
+      try {
+        const hResp = await fetch("http://localhost:8000/persona/status/Halima");
+        if (hResp.ok) {
+          const hData = await hResp.json();
+          setHalimaOnlineState(hData.status === "online");
+        }
+
+        const aResp = await fetch("http://localhost:8000/persona/status/Alex");
+        if (aResp.ok) {
+          const aData = await aResp.json();
+          setAlexOnlineState(aData.status === "online");
+        }
+      } catch (e) {
+        // Only log error once to prevent console spam
+        console.warn("Backend status check failed - ensure main.py is running on :8000");
+      }
+    };
+
+    const interval = setInterval(checkStatus, 3000);
+    checkStatus();
+    return () => clearInterval(interval);
   }, []);
 
   const enterPresenceRoom = async (p: string) => {
@@ -113,6 +148,101 @@ export default function Home() {
       setCallStatus("Failed to start negotiation");
       setTimeout(() => setCallStatus(""), 3000);
     }
+  };
+
+  // Call signaling functions
+  const initiateCall = async () => {
+    const toPersona = persona === "Halima" ? "Alex" : "Halima";
+    console.log(`📞 [UI] Initiating call to ${toPersona}...`);
+    setCallState("calling");
+    setOutgoingCallTo(toPersona);
+
+    try {
+      const resp = await fetch(`http://localhost:8000/call/offer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_persona: persona,
+          to_persona: toPersona
+        })
+      });
+
+      if (!resp.ok) {
+        throw new Error(`Server error: ${resp.status}`);
+      }
+
+      const data = await resp.json();
+      console.log(`📡 [API] /call/offer response:`, data);
+
+      if (data.status === "offline") {
+        console.warn(`🛑 [UI] Target ${toPersona} is offline.`);
+        setCallStatus(`${toPersona} is offline`);
+        setCallState("idle");
+        setOutgoingCallTo(null);
+        setTimeout(() => setCallStatus(""), 3000);
+      } else {
+        console.log(`✅ [UI] Call offer sent successfully.`);
+      }
+    } catch (e) {
+      console.error("❌ [API] Failed to send call offer:", e);
+      setCallState("idle");
+      setOutgoingCallTo(null);
+    }
+  };
+
+  const acceptCall = async () => {
+    if (!incomingCallFrom) return;
+    const meetingId = `harvest_deal_${Math.floor(Math.random() * 10000)}`;
+    console.log(`✅ [UI] Accepting call from ${incomingCallFrom}. Generated MeetingID: ${meetingId}`);
+
+    try {
+      const resp = await fetch(`http://localhost:8000/call/accept`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_persona: incomingCallFrom,
+          to_persona: persona,
+          meeting_id: meetingId
+        })
+      });
+      const data = await resp.json();
+      console.log(`📡 [API] /call/accept response:`, data);
+
+      setCallState("connected");
+      setNegotiationProgress(10);
+      setLkToken(null);
+      setTimeout(() => {
+        fetch(`http://localhost:8000/livekit/token?participant_name=User_${persona}&persona=${persona}&room_name=${data.room}`)
+          .then(res => res.json())
+          .then(d => {
+            console.log(`🔑 [UI] Joined shared call room.`);
+            setLkToken(d.token);
+          });
+      }, 500);
+    } catch (e) {
+      console.error("❌ [API] Failed to accept call:", e);
+    }
+  };
+
+  const declineCall = async () => {
+    if (!incomingCallFrom) return;
+    console.warn(`✖️ [UI] Declining call from ${incomingCallFrom}...`);
+
+    try {
+      await fetch(`http://localhost:8000/call/decline`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from_persona: incomingCallFrom,
+          to_persona: persona
+        })
+      });
+      console.log(`✅ [UI] Call declined successfully.`);
+    } catch (e) {
+      console.error("❌ [API] Failed to decline call:", e);
+    }
+    setCallState("idle");
+    setIncomingCallFrom(null);
   };
 
 
@@ -169,7 +299,7 @@ export default function Home() {
           className="h-full"
         >
           <DashboardContent
-            persona={persona}
+            persona={persona!}
             negotiationProgress={negotiationProgress}
             setNegotiationProgress={setNegotiationProgress}
             timeline={timeline}
@@ -182,6 +312,19 @@ export default function Home() {
             hasMounted={hasMounted}
             onStartNegotiation={startNegotiation}
             callStatus={callStatus}
+            setCallStatus={setCallStatus}
+            callState={callState}
+            setCallState={setCallState}
+            incomingCallFrom={incomingCallFrom}
+            setIncomingCallFrom={setIncomingCallFrom}
+            outgoingCallTo={outgoingCallTo}
+            setOutgoingCallTo={setOutgoingCallTo}
+            initiateCall={initiateCall}
+            acceptCall={acceptCall}
+            declineCall={declineCall}
+            halimaOnlineState={halimaOnlineState}
+            alexOnlineState={alexOnlineState}
+            setLkToken={setLkToken}
           />
           <RoomAudioRenderer />
         </LiveKitRoom>
@@ -204,10 +347,23 @@ function DashboardContent({
   hasMounted,
   onStartNegotiation,
   callStatus,
+  setCallStatus,
+  callState,
+  setCallState,
+  incomingCallFrom,
+  setIncomingCallFrom,
+  outgoingCallTo,
+  setOutgoingCallTo,
+  initiateCall,
+  acceptCall,
+  declineCall,
+  halimaOnlineState,
+  alexOnlineState,
+  setLkToken,
 }: {
-  persona: string | null;
+  persona: string;
   negotiationProgress: number;
-  setNegotiationProgress: React.Dispatch<React.SetStateAction<number>>;
+  setNegotiationProgress: (p: number) => void;
   timeline: Timeline;
   setTimeline: React.Dispatch<React.SetStateAction<Timeline>>;
   barHeights: { orange: number[]; blue: number[] };
@@ -218,6 +374,19 @@ function DashboardContent({
   hasMounted: boolean;
   onStartNegotiation: () => void;
   callStatus: string;
+  setCallStatus: (s: string) => void;
+  callState: "idle" | "calling" | "ringing" | "connected";
+  setCallState: (s: "idle" | "calling" | "ringing" | "connected") => void;
+  incomingCallFrom: string | null;
+  setIncomingCallFrom: (p: string | null) => void;
+  outgoingCallTo: string | null;
+  setOutgoingCallTo: (p: string | null) => void;
+  initiateCall: () => void;
+  acceptCall: () => void;
+  declineCall: () => void;
+  halimaOnlineState: boolean;
+  alexOnlineState: boolean;
+  setLkToken: (token: string | null) => void;
 }) {
   const room = useRoomContext();
 
@@ -256,16 +425,44 @@ function DashboardContent({
 
     const onDataReceived = (payload: Uint8Array, participant?: Participant) => {
       const raw = new TextDecoder().decode(payload);
-      console.warn("📥 RAW DATA RECEIVED:", raw, {
+      console.log(`📩 [SIGNAL] Data received in room ${room.name}:`, raw, {
         from: participant?.identity || participant?.sid,
       });
 
-      let data;
+      let data: any;
       try {
         data = JSON.parse(raw);
         console.warn("✅ PARSED DATA:", data);
+
+        if (data.type === "CALL_OFFER") {
+          console.log(`🔔 [SIGNAL] Incoming call from ${data.from}`);
+          setIncomingCallFrom(data.from);
+          setCallState("ringing");
+          return;
+        } else if (data.type === "CALL_ACCEPTED") {
+          console.log(`🤝 [SIGNAL] Call accepted by ${data.by}. Joining room: ${data.room}`);
+          setCallState("connected");
+          setNegotiationProgress(10);
+          setLkToken(null);
+          setTimeout(() => {
+            fetch(`http://localhost:8000/livekit/token?participant_name=User_${persona}&persona=${persona}&room_name=${data.room}`)
+              .then(res => res.json())
+              .then(d => {
+                console.log(`🔑 [SIGNAL] Joined call room with new token.`);
+                setLkToken(d.token);
+              });
+          }, 500);
+          return;
+        } else if (data.type === "CALL_DECLINED") {
+          console.warn(`✖️ [SIGNAL] Call declined by ${data.by}`);
+          setCallStatus(`${data.by} declined the call`);
+          setCallState("idle");
+          setOutgoingCallTo(null);
+          setTimeout(() => setCallStatus(""), 3000);
+          return;
+        }
       } catch (e) {
-        console.error("❌ JSON parse failed:", raw);
+        console.error("❌ [SIGNAL] Failed to parse data message:", e);
         return;
       }
 
@@ -362,17 +559,74 @@ function DashboardContent({
     console.warn("🔁 TIMELINE STATE CHANGED:", timeline);
   }, [timeline]);
 
-  const halimaTrack = agentTracks[0];
-  const alexTrack = agentTracks[1];
+  const halimaTrack = agentTracks.find(t => t.participant.identity.includes("halima") || (t.participant.name?.toLowerCase().includes("halima")));
+  const alexTrack = agentTracks.find(t => t.participant.identity.includes("alex") || (t.participant.name?.toLowerCase().includes("alex")));
 
-  const halimaOnline = Boolean(halimaTrack);
-  const alexOnline = Boolean(alexTrack);
+  const halimaOnline = halimaOnlineState || Boolean(halimaTrack);
+  const alexOnline = alexOnlineState || Boolean(alexTrack);
 
   const halimaSpeaking = Boolean(halimaTrack?.participant.isSpeaking);
   const alexSpeaking = Boolean(alexTrack?.participant.isSpeaking);
 
+  const isHalimaUser = persona === "Halima";
+  const isAlexUser = persona === "Alex";
+
+  const halimaStatus = halimaTrack ? (halimaSpeaking ? "SPEAKING" : "ACTIVE") : (halimaOnlineState ? "READY" : "OFFLINE");
+  const alexStatus = alexTrack ? (alexSpeaking ? "SPEAKING" : "ACTIVE") : (alexOnlineState ? "READY" : "OFFLINE");
+
   return (
     <div className="max-w-7xl mx-auto">
+      {/* Incoming Call Modal (Ringing) */}
+      {callState === "ringing" && incomingCallFrom && (
+        <div className="fixed inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-sm">
+          <div className="bg-gray-900 p-10 rounded-2xl text-center border border-orange-500/30 shadow-2xl max-w-md">
+            <div className="w-24 h-24 bg-orange-500 rounded-full mx-auto mb-6 animate-pulse flex items-center justify-center">
+              <span className="text-4xl">📞</span>
+            </div>
+            <h2 className="text-3xl font-black mb-3 text-orange-500">Incoming Call</h2>
+            <p className="text-gray-300 mb-8 text-lg">{incomingCallFrom} is calling...</p>
+
+            <div className="flex gap-4 justify-center">
+              <button
+                onClick={declineCall}
+                className="px-8 py-4 bg-red-500 hover:bg-red-600 rounded-xl font-bold text-lg transition-all hover:scale-105"
+              >
+                Decline
+              </button>
+              <button
+                onClick={acceptCall}
+                className="px-8 py-4 bg-green-500 hover:bg-green-600 rounded-xl font-bold text-lg transition-all hover:scale-105"
+              >
+                Accept
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Outgoing Call Modal (Calling) */}
+      {callState === "calling" && outgoingCallTo && (
+        <div className="fixed inset-0 bg-black/90 flex items-center justify-center z-50 backdrop-blur-sm">
+          <div className="bg-gray-900 p-10 rounded-2xl text-center border border-blue-500/30 shadow-2xl max-w-md">
+            <div className="w-24 h-24 bg-blue-500 rounded-full mx-auto mb-6 animate-ping flex items-center justify-center">
+              <span className="text-4xl">📱</span>
+            </div>
+            <h2 className="text-3xl font-black mb-3 text-blue-500">Calling...</h2>
+            <p className="text-gray-300 mb-8 text-lg">{outgoingCallTo}</p>
+
+            <button
+              onClick={() => {
+                setCallState("idle");
+                setOutgoingCallTo(null);
+              }}
+              className="px-8 py-4 bg-red-500 hover:bg-red-600 rounded-xl font-bold text-lg transition-all hover:scale-105"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Call Status Toast */}
       {callStatus && (
         <div className="fixed top-4 right-4 bg-orange-500 text-black px-6 py-3 rounded-lg font-bold shadow-lg z-50 animate-pulse">
@@ -397,10 +651,11 @@ function DashboardContent({
         </div>
         <div className="flex gap-6 items-center">
           <button
-            onClick={onStartNegotiation}
-            className="px-6 py-3 bg-orange-500 hover:bg-orange-600 border border-orange-400 rounded-xl text-xs text-black font-black uppercase tracking-widest transition-all hover:scale-105 active:scale-95 shadow-[0_0_20px_rgba(249,115,22,0.3)]"
+            onClick={initiateCall}
+            disabled={callState !== "idle"}
+            className={`px-6 py-3 ${callState === "idle" ? "bg-orange-500 hover:bg-orange-600" : "bg-gray-600 cursor-not-allowed"} border border-orange-400 rounded-xl text-xs text-black font-black uppercase tracking-widest transition-all hover:scale-105 active:scale-95 shadow-[0_0_20px_rgba(249,115,22,0.3)]`}
           >
-            Start Negotiation
+            📞 Call {persona === "Halima" ? "Alex" : "Halima"}
           </button>
           <div className="flex gap-4 pr-6 border-r border-white/10 items-center">
             <div className="flex items-center gap-2">
@@ -411,7 +666,7 @@ function DashboardContent({
                   }`}
               />
               <span className={`text-[10px] font-mono uppercase transition-colors ${halimaOnline ? "text-gray-300" : "text-gray-600"}`}>
-                HALIMA: {halimaOnline ? (halimaSpeaking ? "SPEAKING" : "ACTIVE") : "OFFLINE"}
+                HALIMA: {halimaStatus}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -422,14 +677,14 @@ function DashboardContent({
                   }`}
               />
               <span className={`text-[10px] font-mono uppercase transition-colors ${alexOnline ? "text-gray-300" : "text-gray-600"}`}>
-                ALEX: {alexOnline ? (alexSpeaking ? "SPEAKING" : "ACTIVE") : "OFFLINE"}
+                ALEX: {alexStatus}
               </span>
             </div>
           </div>
           <div className="text-right">
             <p className="text-[10px] text-gray-600 uppercase">LiveKit Room</p>
             <p className="text-xs font-mono text-green-500 flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" /> BARN_ROOM_01
+              <span className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse" /> {room.name || "CONNECTING..."}
             </p>
           </div>
         </div>

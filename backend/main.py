@@ -1,20 +1,43 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import os
+import json
 from dotenv import load_dotenv
 from pathlib import Path
 from livekit import api
-from livekit.api import CreateAgentDispatchRequest
-
-import os
-from dotenv import load_dotenv
+from livekit.api import CreateAgentDispatchRequest, ListRoomsRequest, SendDataRequest
+from contextlib import asynccontextmanager
 
 load_dotenv()
 
-if not os.getenv("LIVEKIT_URL") and os.getenv("NEXT_PUBLIC_LIVEKIT_URL"):
-    os.environ["LIVEKIT_URL"] = os.getenv("NEXT_PUBLIC_LIVEKIT_URL")
+# Global variable for LiveKit API client
+lk_api = None
 
-app = FastAPI(title="Harvest Backend")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global lk_api
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    lk_url = os.getenv("LIVEKIT_URL") or os.getenv("NEXT_PUBLIC_LIVEKIT_URL")
+
+    # Ensure URL is HTTP(S) for API calls, not WSS
+    if lk_url and lk_url.startswith("wss://"):
+        lk_url = lk_url.replace("wss://", "https://")
+
+    if api_key and api_secret and lk_url:
+        print(f"📡 Initializing LiveKit API client for {lk_url}")
+        lk_api = api.LiveKitAPI(lk_url, api_key, api_secret)
+    else:
+        print("⚠️ LiveKit credentials missing! API endpoints will fail.")
+        
+    yield
+    
+    if lk_api:
+        await lk_api.aclose()
+        print("🔌 LiveKit API client closed.")
+
+app = FastAPI(title="Harvest Backend", lifespan=lifespan)
 
 # CORS middleware
 app.add_middleware(
@@ -111,14 +134,9 @@ async def start_call(room_name: str):
         active_calls.discard(room_name)
         raise HTTPException(status_code=500, detail="LiveKit credentials not configured")
     
-    client = api.LiveKitAPI(lk_url, api_key, api_secret)
-    
     try:
-        # Check if agents are already in the room (optional but good for multi-user)
-        # For simplicity in demo, we just dispatch. LiveKit handles dispatch requests.
-        
         # Dispatch Halima into call room
-        await client.agent_dispatch.create_dispatch(
+        await lk_api.agent_dispatch.create_dispatch(
             CreateAgentDispatchRequest(
                 room=room_name,
                 agent_name="negotiation-worker",
@@ -127,7 +145,7 @@ async def start_call(room_name: str):
         )
 
         # Dispatch Alex into call room
-        await client.agent_dispatch.create_dispatch(
+        await lk_api.agent_dispatch.create_dispatch(
             CreateAgentDispatchRequest(
                 room=room_name,
                 agent_name="negotiation-worker",
@@ -135,7 +153,6 @@ async def start_call(room_name: str):
             )
         )
 
-        await client.aclose()
         return {
             "status": "call_started",
             "room": room_name,
@@ -144,7 +161,6 @@ async def start_call(room_name: str):
 
     except Exception as e:
         active_calls.discard(room_name)  # Remove from active calls on error
-        await client.aclose()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/negotiation/end")
@@ -159,13 +175,183 @@ async def end_call(room_name: str):
         "room": room_name
     }
 
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
+async def is_persona_online(persona: str) -> bool:
+    """Helper to check if a persona is online in their presence room"""
+    if not lk_api:
+        return False
+        
+    presence_room = f"presence-{persona.lower()}"
+    try:
+        # Canonical way in Python SDK: Pass ListRoomsRequest and access .rooms
+        rooms_resp = await lk_api.room.list_rooms(ListRoomsRequest())
+        rooms = rooms_resp.rooms
+        
+        # Find room and check for participants
+        target = next((r for r in rooms if r.name == presence_room), None)
+        return bool(target and target.num_participants > 0)
+    except Exception as e:
+        print(f"🕵️ Error checking presence for {persona}: {e}")
+        return False
+
+# -------------------------------------------------
+# Call Signaling Models
+# -------------------------------------------------
+class CallOfferRequest(BaseModel):
+    from_persona: str
+    to_persona: str
+
+class CallAcceptRequest(BaseModel):
+    from_persona: str
+    to_persona: str
+    meeting_id: str
+
+class CallDeclineRequest(BaseModel):
+    from_persona: str
+    to_persona: str
+
+# -------------------------------------------------
+# Call Signaling Endpoints
+# -------------------------------------------------
+@app.post("/call/offer")
+async def call_offer(request: CallOfferRequest):
+    """Send call offer to target persona's presence room via data message"""
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    lk_url = os.getenv("LIVEKIT_URL")
+    
+    if not lk_api:
+        raise HTTPException(status_code=500, detail="LiveKit API not initialized")
+    
+    print(f"📦 [OFFER] From: {request.from_persona}, To: {request.to_persona}")
+    to_room = f"presence-{request.to_persona.lower()}"
+    
+    try:
+        # Checking presence
+        print(f"🕵️  [OFFER] Checking presence for {request.to_persona}...")
+        is_online = await is_persona_online(request.to_persona)
+        
+        if not is_online:
+            print(f"🛑 [OFFER] Target {request.to_persona} is OFFLINE.")
+            return {"status": "offline", "to": request.to_persona}
+
+        print(f"📡 [OFFER] Sending CALL_OFFER to {to_room}...")
+        # Send data message using RoomService
+        await lk_api.room.send_data(
+            SendDataRequest(
+                room=to_room,
+                data=json.dumps({
+                    "type": "CALL_OFFER",
+                    "from": request.from_persona
+                }).encode('utf-8'),
+                kind=api.DataPacket.Kind.RELIABLE
+            )
+        )
+        print(f"✔️  [OFFER] Successfully sent OFFER signal.")
+        return {"status": "offer_sent", "to": request.to_persona}
+    except Exception as e:
+        print(f"❌ Call Offer Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/call/accept")
+async def call_accept(request: CallAcceptRequest):
+    """Accept call: create call room, dispatch agents, notify caller"""
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    lk_url = os.getenv("LIVEKIT_URL")
+    
+    if not lk_api:
+        raise HTTPException(status_code=500, detail="LiveKit API not initialized")
+    
+    print(f"📦 [ACCEPT] From: {request.from_persona}, To: {request.to_persona}, MeetingID: {request.meeting_id}")
+    call_room = f"call-{request.meeting_id.lower().replace(' ', '_')}"
+    
+    if call_room in active_calls:
+        print(f"⚠️ [ACCEPT] Call room {call_room} already active, skipping dispatch.")
+        return {"status": "already_running", "room": call_room}
+    
+    active_calls.add(call_room)
+    
+    try:
+        print(f"🤖 [ACCEPT] Dispatching agents to {call_room}...")
+        # Dispatch both agents
+        await lk_api.agent_dispatch.create_dispatch(
+            CreateAgentDispatchRequest(
+                room=call_room,
+                agent_name="negotiation-worker",
+                metadata='{"role": "seller", "persona": "Halima"}',
+            )
+        )
+        await lk_api.agent_dispatch.create_dispatch(
+            CreateAgentDispatchRequest(
+                room=call_room,
+                agent_name="negotiation-worker",
+                metadata='{"role": "buyer", "persona": "Alex"}',
+            )
+        )
+        
+        # Notify caller
+        caller_room = f"presence-{request.from_persona.lower()}"
+        print(f"📡 [ACCEPT] Notifying caller {request.from_persona} in {caller_room}...")
+        await lk_api.room.send_data(
+            SendDataRequest(
+                room=caller_room,
+                data=json.dumps({
+                    "type": "CALL_ACCEPTED",
+                    "by": request.to_persona,
+                    "room": call_room
+                }).encode('utf-8'),
+                kind=api.DataPacket.Kind.RELIABLE
+            )
+        )
+        
+        print(f"✔️  [ACCEPT] Flow complete for room {call_room}")
+        return {"status": "accepted", "room": call_room, "agents": ["Halima", "Alex"]}
+    except Exception as e:
+        active_calls.discard(call_room)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/call/decline")
+async def call_decline(request: CallDeclineRequest):
+    """Decline incoming call and notify caller"""
+    api_key = os.getenv("LIVEKIT_API_KEY")
+    api_secret = os.getenv("LIVEKIT_API_SECRET")
+    lk_url = os.getenv("LIVEKIT_URL")
+    
+    if not lk_api:
+        raise HTTPException(status_code=500, detail="LiveKit API not initialized")
+    
+    caller_room = f"presence-{request.from_persona.lower()}"
+    
+    try:
+        await lk_api.room.send_data(
+            SendDataRequest(
+                room=caller_room,
+                data=json.dumps({
+                    "type": "CALL_DECLINED",
+                    "by": request.to_persona
+                }).encode('utf-8'),
+                kind=api.DataPacket.Kind.RELIABLE
+            )
+        )
+        return {"status": "declined"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/market-price/{crop}")
 async def get_market_price(crop: str):
     prices = {"maize": 1.25, "beans": 0.85}
     price = prices.get(crop.lower(), 1.0)
     return {"crop": crop, "price": price, "unit": "kg"}
 
+@app.get("/persona/status/{persona}")
+async def get_persona_status(persona: str):
+    """Check if a persona is online in their presence room"""
+    is_online = await is_persona_online(persona)
+    return {"status": "online" if is_online else "offline"}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
