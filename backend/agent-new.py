@@ -88,7 +88,7 @@ NEGOTIATION RULES:
 
     await ctx.connect()
 
-    # Create AgentSession with natural turn detection
+    # Create AgentSession with natural turn detection and echo prevention
     session = AgentSession(
         stt=deepgram.STT(),
         llm=groq.LLM(model="llama-3.3-70b-versatile"),
@@ -99,6 +99,10 @@ NEGOTIATION RULES:
         tts=azure.TTS(voice=voice_name), # Azure TTS for testing
         vad=ctx.proc.userdata["vad"],
         turn_detection=MultilingualModel(), # Natural turns via Multilingual Model
+        
+        # Echo prevention: prevent agents from resuming after false interruptions
+        resume_false_interruption=False,
+        false_interruption_timeout=0.0,
     )
 
     # Start session
