@@ -443,15 +443,20 @@ function DashboardContent({
           console.log(`🤝 [SIGNAL] Call accepted by ${data.by}. Joining room: ${data.room}`);
           setCallState("connected");
           setNegotiationProgress(10);
-          setLkToken(null);
+
+          // Disconnect from current room first
+          console.log(`🔌 [SIGNAL] Disconnecting from ${room.name} to switch to call room...`);
+          room.disconnect();
+
+          // Wait for disconnect, then join call room
           setTimeout(() => {
             fetch(`http://localhost:8000/livekit/token?participant_name=User_${persona}&persona=${persona}&room_name=${data.room}`)
               .then(res => res.json())
               .then(d => {
-                console.log(`🔑 [SIGNAL] Joined call room with new token.`);
+                console.log(`🔑 [SIGNAL] Joined call room ${data.room} with new token.`);
                 setLkToken(d.token);
               });
-          }, 500);
+          }, 1000);
           return;
         } else if (data.type === "CALL_DECLINED") {
           console.warn(`✖️ [SIGNAL] Call declined by ${data.by}`);
@@ -571,8 +576,12 @@ function DashboardContent({
   const isHalimaUser = persona === "Halima";
   const isAlexUser = persona === "Alex";
 
-  const halimaStatus = halimaTrack ? (halimaSpeaking ? "SPEAKING" : "ACTIVE") : (halimaOnlineState ? "READY" : "OFFLINE");
-  const alexStatus = alexTrack ? (alexSpeaking ? "SPEAKING" : "ACTIVE") : (alexOnlineState ? "READY" : "OFFLINE");
+  const halimaStatus = halimaTrack
+    ? (halimaSpeaking ? "SPEAKING" : "ACTIVE")
+    : (callState === "connected" ? "CONNECTED" : (halimaOnlineState ? "READY" : "OFFLINE"));
+  const alexStatus = alexTrack
+    ? (alexSpeaking ? "SPEAKING" : "ACTIVE")
+    : (callState === "connected" ? "CONNECTED" : (alexOnlineState ? "READY" : "OFFLINE"));
 
   return (
     <div className="max-w-7xl mx-auto">
