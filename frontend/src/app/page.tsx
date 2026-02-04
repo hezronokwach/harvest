@@ -48,16 +48,16 @@ export default function Home() {
 
   const [timeline, setTimeline] = useState<Timeline>({ turn: 0, round: 0, maxRounds: 8 });
   const [negotiationProgress, setNegotiationProgress] = useState(0);
+  const [barHeights, setBarHeights] = useState({ orange: [0, 0, 0], blue: [0, 0, 0] });
   const [thoughts, setThoughts] = useState<Array<{ id: string; agent: string; text: string; type: "strategy" | "insight" | "warning" }>>([]);
   const [transcripts, setTranscripts] = useState<Array<{ id: string; agent: string; text: string }>>([]);
+  const [callStatus, setCallStatus] = useState<string>("");
 
 
   useEffect(() => {
     const timer = setTimeout(() => setHasMounted(true), 0);
     return () => clearTimeout(timer);
-  }, []);
-
-  const [barHeights, setBarHeights] = useState<{ orange: number[], blue: number[] }>({ orange: [], blue: [] });
+  });
 
   useEffect(() => {
     setBarHeights({
@@ -83,7 +83,14 @@ export default function Home() {
       const callRoom = `call-${meetingId.toLowerCase().replace(/\s+/g, "_")}`;
       const resp = await fetch(`http://localhost:8000/negotiation/call?room_name=${callRoom}`, { method: "POST" });
       const data = await resp.json();
-      console.log("Call started:", data);
+
+      if (data.status === "already_running") {
+        console.log("Call already in progress, joining...");
+        setCallStatus("Joining ongoing negotiation...");
+      } else {
+        console.log("Call started:", data);
+        setCallStatus("Starting negotiation...");
+      }
 
       // Force disconnect from presence room
       setInRoom(false);
@@ -98,8 +105,13 @@ export default function Home() {
       // Reconnect with new token to call room
       setLkToken(tokenData.token);
       setInRoom(true);
+
+      // Clear status after 3 seconds
+      setTimeout(() => setCallStatus(""), 3000);
     } catch (e) {
       console.error("Failed to start negotiation:", e);
+      setCallStatus("Failed to start negotiation");
+      setTimeout(() => setCallStatus(""), 3000);
     }
   };
 
@@ -169,6 +181,7 @@ export default function Home() {
             setTranscripts={setTranscripts}
             hasMounted={hasMounted}
             onStartNegotiation={startNegotiation}
+            callStatus={callStatus}
           />
           <RoomAudioRenderer />
         </LiveKitRoom>
@@ -190,6 +203,7 @@ function DashboardContent({
   setTranscripts,
   hasMounted,
   onStartNegotiation,
+  callStatus,
 }: {
   persona: string | null;
   negotiationProgress: number;
@@ -203,6 +217,7 @@ function DashboardContent({
   setTranscripts: React.Dispatch<React.SetStateAction<Array<{ id: string; agent: string; text: string }>>>;
   hasMounted: boolean;
   onStartNegotiation: () => void;
+  callStatus: string;
 }) {
   const room = useRoomContext();
 
@@ -358,14 +373,26 @@ function DashboardContent({
 
   return (
     <div className="max-w-7xl mx-auto">
+      {/* Call Status Toast */}
+      {callStatus && (
+        <div className="fixed top-4 right-4 bg-orange-500 text-black px-6 py-3 rounded-lg font-bold shadow-lg z-50 animate-pulse">
+          {callStatus}
+        </div>
+      )}
+
       <div className="mb-4 p-3 bg-red-900/80 text-white font-mono text-[10px] border border-red-500 rounded flex justify-between items-center backdrop-blur-sm">
       </div>
       <div className="flex justify-between items-center mb-12 border-b border-white/5 pb-8">
         <div>
-          <h1 className="text-3xl font-black tracking-tighter uppercase italic flex items-center gap-2">
-            <span className="text-orange-500">Harvest</span>
-            <span className="bg-orange-500 text-black text-[10px] px-1.5 py-0.5 not-italic tracking-normal rounded font-bold">ALPHA</span>
-          </h1>
+          {/* Persona Header */}
+          <div className="flex items-center gap-3 mb-2">
+            <div className={`w-3 h-3 rounded-full ${persona === "Halima" ? "bg-orange-500" : "bg-blue-500"} animate-pulse`}></div>
+            <h1 className="text-3xl font-black tracking-tighter uppercase italic">
+              <span className={persona === "Halima" ? "text-orange-500" : "text-blue-500"}>
+                {persona}'s Agent
+              </span>
+            </h1>
+          </div>
           <p className="text-gray-500 text-xs mt-1 uppercase tracking-widest">Farmer&apos;s Strategic Negotiation Hub</p>
         </div>
         <div className="flex gap-6 items-center">
