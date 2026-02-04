@@ -567,8 +567,8 @@ function DashboardContent({
   const halimaTrack = agentTracks.find(t => t.participant.identity.includes("halima") || (t.participant.name?.toLowerCase().includes("halima")));
   const alexTrack = agentTracks.find(t => t.participant.identity.includes("alex") || (t.participant.name?.toLowerCase().includes("alex")));
 
-  const halimaOnline = halimaOnlineState || Boolean(halimaTrack);
-  const alexOnline = alexOnlineState || Boolean(alexTrack);
+  const halimaOnline = halimaOnlineState || Boolean(halimaTrack) || callState === "connected";
+  const alexOnline = alexOnlineState || Boolean(alexTrack) || callState === "connected";
 
   const halimaSpeaking = Boolean(halimaTrack?.participant.isSpeaking);
   const alexSpeaking = Boolean(alexTrack?.participant.isSpeaking);
