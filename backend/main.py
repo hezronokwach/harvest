@@ -59,9 +59,10 @@ async def get_hume_token():
         raise HTTPException(status_code=500, detail=f"Failed to fetch Hume access token: {str(e)}")
 
 @app.get("/livekit/token")
-async def get_livekit_token(participant_name: str, room_name: str = "BARN_ROOM_01"):
+async def get_livekit_token(participant_name: str, persona: str = "Halima", room_name: str = None):
     """
-    Generates a LiveKit access token for a participant.
+    Generates a LiveKit access token for a participant to join a room.
+    If room_name is not provided, joins their presence room.
     """
     api_key = os.getenv("LIVEKIT_API_KEY")
     api_secret = os.getenv("LIVEKIT_API_SECRET")
@@ -69,8 +70,12 @@ async def get_livekit_token(participant_name: str, room_name: str = "BARN_ROOM_0
     if not api_key or not api_secret:
         raise HTTPException(status_code=500, detail="LiveKit credentials not configured")
 
+    # The presence room is unique to this persona if no specific room provided
+    if not room_name:
+        room_name = f"presence-{persona.lower()}"
+
     token = api.AccessToken(api_key, api_secret) \
-        .with_identity(participant_name) \
+        .with_identity(f"user-{persona.lower()}") \
         .with_name(participant_name) \
         .with_grants(api.VideoGrants(
             room_join=True,
@@ -80,52 +85,18 @@ async def get_livekit_token(participant_name: str, room_name: str = "BARN_ROOM_0
             agents=[
                 api.RoomAgentDispatch(
                     agent_name="negotiation-worker",
-                    metadata='{"role": "seller", "persona": "Juma"}'
-                ),
-                api.RoomAgentDispatch(
-                    agent_name="negotiation-worker",
-                    metadata='{"role": "buyer", "persona": "Alex"}'
+                    metadata=f'{{"role": "{"seller" if persona == "Halima" else "buyer"}", "persona": "{persona}"}}'
                 )
             ]
         ))
 
-    return {"token": token.to_jwt()}
+    return {"token": token.to_jwt(), "room": room_name}
 
-@app.get("/debug/token")
-async def debug_token(participant_name: str, room_name: str = "BARN_ROOM_01"):
+@app.post("/negotiation/call")
+async def start_call(room_name: str):
     """
-    Returns the decoded token claims to verify dispatch rules.
+    Bridges Halima and Alex into a specific shared call room.
     """
-    import jwt
-    api_key = os.getenv("LIVEKIT_API_KEY")
-    api_secret = os.getenv("LIVEKIT_API_SECRET")
-    
-    token = api.AccessToken(api_key, api_secret) \
-        .with_identity(participant_name) \
-        .with_name(participant_name) \
-        .with_grants(api.VideoGrants(
-            room_join=True,
-            room=room_name,
-        )) \
-        .with_room_config(api.RoomConfiguration(
-            agents=[
-                api.RoomAgentDispatch(
-                    agent_name="negotiation-worker",
-                    metadata='{"role": "seller", "persona": "Juma"}'
-                ),
-                api.RoomAgentDispatch(
-                    agent_name="negotiation-worker",
-                    metadata='{"role": "buyer", "persona": "Alex"}'
-                )
-            ]
-        ))
-        
-    jwt_token = token.to_jwt()
-    decoded = jwt.decode(jwt_token, options={"verify_signature": False})
-    return {"claims": decoded}
-
-@app.post("/livekit/dispatch")
-async def dispatch_agents(room_name: str = "BARN_ROOM_01"):
     api_key = os.getenv("LIVEKIT_API_KEY")
     api_secret = os.getenv("LIVEKIT_API_SECRET")
     lk_url = os.getenv("LIVEKIT_URL")
@@ -134,18 +105,21 @@ async def dispatch_agents(room_name: str = "BARN_ROOM_01"):
         raise HTTPException(status_code=500, detail="LiveKit credentials not configured")
 
     client = api.LiveKitAPI(lk_url, api_key, api_secret)
-
+    
     try:
-        # Dispatch Halima
+        # Check if agents are already in the room (optional but good for multi-user)
+        # For simplicity in demo, we just dispatch. LiveKit handles dispatch requests.
+        
+        # Dispatch Halima into call room
         await client.agent_dispatch.create_dispatch(
             CreateAgentDispatchRequest(
                 room=room_name,
                 agent_name="negotiation-worker",
-                metadata='{"role": "seller", "persona": "Juma"}',
+                metadata='{"role": "seller", "persona": "Halima"}',
             )
         )
 
-        # Dispatch Alex
+        # Dispatch Alex into call room
         await client.agent_dispatch.create_dispatch(
             CreateAgentDispatchRequest(
                 room=room_name,
@@ -155,7 +129,11 @@ async def dispatch_agents(room_name: str = "BARN_ROOM_01"):
         )
 
         await client.aclose()
-        return {"status": "dispatched", "agents": ["halima-agent", "alex-agent"]}
+        return {
+            "status": "call_started",
+            "room": room_name,
+            "agents": ["Halima", "Alex"]
+        }
 
     except Exception as e:
         await client.aclose()
@@ -163,42 +141,11 @@ async def dispatch_agents(room_name: str = "BARN_ROOM_01"):
 
 @app.get("/market-price/{crop}")
 async def get_market_price(crop: str):
-    """
-    Standard market price lookup.
-    Used by Hume Agent Tools to stay grounded in real data.
-    """
-    prices = {
-        "potato": 1.25,
-        "maize": 0.85,
-        "tomatoes": 2.10
-    }
-    price = prices.get(crop.lower())
-    if price is None:
-        raise HTTPException(status_code=404, detail="Crop price not found")
-    
-    return {
-        "crop": crop, 
-        "price": price, 
-        "unit": "kg", 
-        "currency": "USD",
-        "market_trend": "Rising" if price > 1.0 else "Stable"
-    }
-
-@app.post("/negotiation/strategy")
-async def get_strategy_hint(buyer_stress: float, buyer_urgency: float):
-    """
-    Tactical Empathy Orchestrator.
-    Determines if Halima should hold firm, flinch, or use silence.
-    """
-    hint = "[ Alex sounds controlled. Hold your price. ]"
-    
-    if buyer_stress > 0.7:
-        hint = "[ Detect high stress in Buyer. Use Mirroring and Tactical Silence. ]"
-    elif buyer_urgency > 0.8:
-        hint = "[ Buyer is hurried. Hold the anchor at $1.25. They need to move. ]"
-        
-    return {"hint": hint}
+    prices = {"maize": 1.25, "beans": 0.85}
+    price = prices.get(crop.lower(), 1.0)
+    return {"crop": crop, "price": price, "unit": "kg"}
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+

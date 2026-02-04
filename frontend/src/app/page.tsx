@@ -42,11 +42,15 @@ export default function Home() {
   const [lkToken, setLkToken] = useState<string | null>(null);
   const [hasMounted, setHasMounted] = useState(false);
   const [inRoom, setInRoom] = useState(false);
+  const [persona, setPersona] = useState<string | null>(null);
+  const [meetingId, setMeetingId] = useState<string>("HARVEST_DEAL_1");
+
 
   const [timeline, setTimeline] = useState<Timeline>({ turn: 0, round: 0, maxRounds: 8 });
   const [negotiationProgress, setNegotiationProgress] = useState(0);
   const [thoughts, setThoughts] = useState<Array<{ id: string; agent: string; text: string; type: "strategy" | "insight" | "warning" }>>([]);
   const [transcripts, setTranscripts] = useState<Array<{ id: string; agent: string; text: string }>>([]);
+
 
   useEffect(() => {
     const timer = setTimeout(() => setHasMounted(true), 0);
@@ -56,33 +60,49 @@ export default function Home() {
   const [barHeights, setBarHeights] = useState<{ orange: number[], blue: number[] }>({ orange: [], blue: [] });
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setBarHeights({
-        orange: [...Array(20)].map(() => Math.random() * 60 + 20),
-        blue: [...Array(20)].map(() => Math.random() * 60 + 20)
-      });
-    }, 0);
-    return () => clearTimeout(timer);
+    setBarHeights({
+      orange: [...Array(20)].map(() => Math.random() * 60 + 20),
+      blue: [...Array(20)].map(() => Math.random() * 60 + 20)
+    });
   }, []);
 
-  const enterWarRoom = async () => {
+  const enterPresenceRoom = async (p: string) => {
     try {
-      const resp = await fetch(`http://localhost:8000/livekit/token?participant_name=Observer_${Math.random().toString(36).substring(7)}`);
+      setPersona(p);
+      const resp = await fetch(`http://localhost:8000/livekit/token?participant_name=User_${p}&persona=${p}`);
       const data = await resp.json();
       setLkToken(data.token);
       setInRoom(true);
     } catch (e) {
-      console.error("Failed to join room:", e);
+      console.error("Failed to join presence room:", e);
     }
   };
 
-  const dispatchAgents = async () => {
+  const startNegotiation = async () => {
     try {
-      await fetch("http://localhost:8000/livekit/dispatch", { method: "POST" });
+      const callRoom = `call-${meetingId.toLowerCase().replace(/\s+/g, "_")}`;
+      const resp = await fetch(`http://localhost:8000/negotiation/call?room_name=${callRoom}`, { method: "POST" });
+      const data = await resp.json();
+      console.log("Call started:", data);
+
+      // Force disconnect from presence room
+      setInRoom(false);
+
+      // Wait a moment for disconnect to complete
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Get a new token for the shared call room
+      const tokenResp = await fetch(`http://localhost:8000/livekit/token?participant_name=User_${persona}&persona=${persona}&room_name=${callRoom}`);
+      const tokenData = await tokenResp.json();
+
+      // Reconnect with new token to call room
+      setLkToken(tokenData.token);
+      setInRoom(true);
     } catch (e) {
-      console.error("Failed to dispatch agents:", e);
+      console.error("Failed to start negotiation:", e);
     }
   };
+
 
   if (!hasMounted) return null;
 
@@ -93,13 +113,38 @@ export default function Home() {
           <h1 className="text-6xl font-black tracking-tighter uppercase italic mb-4">
             <span className="text-orange-500">Harvest</span>
           </h1>
-          <p className="text-gray-400 mb-8 max-w-md">Secure agricultural negotiation at high frequency. Connect to the digitalHarvest Room.</p>
-          <button
-            onClick={enterWarRoom}
-            className="px-8 py-4 bg-orange-500 text-black font-black uppercase tracking-widest rounded-full hover:scale-105 transition-transform"
-          >
-            Enter Harvest Room
-          </button>
+          <p className="text-gray-400 mb-8 max-w-md">Stateless decentralized agents for agricultural negotiation. Select your role to begin.</p>
+
+          <div className="mb-12 w-full max-w-xs mx-auto">
+            <label className="block text-[10px] uppercase font-black tracking-widest text-gray-500 mb-2">Meeting ID</label>
+            <input
+              type="text"
+              value={meetingId}
+              onChange={(e) => setMeetingId(e.target.value)}
+              className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-center font-mono text-orange-500 focus:outline-none focus:border-orange-500/50 transition-colors"
+              placeholder="e.g. DEAL_FEB"
+            />
+          </div>
+
+          <div className="flex gap-8">
+            <button
+              onClick={() => enterPresenceRoom("Halima")}
+              className="group relative px-12 py-6 bg-orange-500 rounded-2xl hover:scale-105 transition-all text-left"
+            >
+              <span className="block text-black font-black uppercase tracking-widest text-xl">Halima</span>
+              <span className="block text-black/60 text-xs font-bold uppercase tracking-tight">The Seller (Farmer)</span>
+              <div className="absolute -inset-2 bg-orange-500/20 blur-xl opacity-0 group-hover:opacity-100 transition-opacity" />
+            </button>
+
+            <button
+              onClick={() => enterPresenceRoom("Alex")}
+              className="group relative px-12 py-6 bg-white/5 border border-white/10 rounded-2xl hover:scale-105 transition-all text-left"
+            >
+              <span className="block text-white font-black uppercase tracking-widest text-xl">Alex</span>
+              <span className="block text-white/40 text-xs font-bold uppercase tracking-tight">The Buyer (Commodity Agent)</span>
+              <div className="absolute -inset-2 bg-white/5 blur-xl opacity-0 group-hover:opacity-100 transition-opacity" />
+            </button>
+          </div>
         </div>
       ) : (
         <LiveKitRoom
@@ -112,6 +157,7 @@ export default function Home() {
           className="h-full"
         >
           <DashboardContent
+            persona={persona}
             negotiationProgress={negotiationProgress}
             setNegotiationProgress={setNegotiationProgress}
             timeline={timeline}
@@ -122,6 +168,7 @@ export default function Home() {
             transcripts={transcripts}
             setTranscripts={setTranscripts}
             hasMounted={hasMounted}
+            onStartNegotiation={startNegotiation}
           />
           <RoomAudioRenderer />
         </LiveKitRoom>
@@ -131,6 +178,7 @@ export default function Home() {
 }
 
 function DashboardContent({
+  persona,
   negotiationProgress,
   setNegotiationProgress,
   timeline,
@@ -141,7 +189,9 @@ function DashboardContent({
   transcripts,
   setTranscripts,
   hasMounted,
+  onStartNegotiation,
 }: {
+  persona: string | null;
   negotiationProgress: number;
   setNegotiationProgress: React.Dispatch<React.SetStateAction<number>>;
   timeline: Timeline;
@@ -152,6 +202,7 @@ function DashboardContent({
   transcripts: Array<{ id: string; agent: string; text: string }>;
   setTranscripts: React.Dispatch<React.SetStateAction<Array<{ id: string; agent: string; text: string }>>>;
   hasMounted: boolean;
+  onStartNegotiation: () => void;
 }) {
   const room = useRoomContext();
 
@@ -319,16 +370,10 @@ function DashboardContent({
         </div>
         <div className="flex gap-6 items-center">
           <button
-            onClick={async () => {
-              try {
-                await fetch("http://localhost:8000/livekit/dispatch", { method: "POST" });
-              } catch (e) {
-                console.error("Dispatch failed:", e);
-              }
-            }}
-            className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all hover:scale-105 active:scale-95"
+            onClick={onStartNegotiation}
+            className="px-6 py-3 bg-orange-500 hover:bg-orange-600 border border-orange-400 rounded-xl text-xs text-black font-black uppercase tracking-widest transition-all hover:scale-105 active:scale-95 shadow-[0_0_20px_rgba(249,115,22,0.3)]"
           >
-            Deploy Agents
+            Start Negotiation
           </button>
           <div className="flex gap-4 pr-6 border-r border-white/10 items-center">
             <div className="flex items-center gap-2">
