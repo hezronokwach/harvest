@@ -249,43 +249,98 @@ export default function Home() {
   if (!hasMounted) return null;
 
   return (
-    <main className="min-h-screen bg-[#050505] text-white p-8 font-sans selection:bg-orange-500/30">
-      {!inRoom ? (
-        <div className="max-w-7xl mx-auto h-[80vh] flex flex-col items-center justify-center text-center">
-          <h1 className="text-6xl font-black tracking-tighter uppercase italic mb-4">
-            <span className="text-orange-500">Harvest</span>
-          </h1>
-          <p className="text-gray-400 mb-8 max-w-md">Stateless decentralized agents for agricultural negotiation. Select your role to begin.</p>
+    <main className="min-h-screen bg-[#050505] text-white p-8 font-sans selection:bg-orange-500/30 relative overflow-hidden">
+      {/* Animated Background Orbs */}
+      <div className="fixed inset-0 pointer-events-none overflow-hidden">
+        <div className="absolute top-20 left-20 w-96 h-96 bg-orange-500/20 rounded-full blur-3xl animate-float animate-glow-pulse" />
+        <div className="absolute bottom-20 right-20 w-80 h-80 bg-blue-500/20 rounded-full blur-3xl animate-float animate-glow-pulse" style={{ animationDelay: '2s' }} />
+        <div className="absolute top-1/2 left-1/2 w-64 h-64 bg-purple-500/10 rounded-full blur-3xl animate-float animate-glow-pulse" style={{ animationDelay: '4s' }} />
+      </div>
 
-          <div className="mb-12 w-full max-w-xs mx-auto">
-            <label className="block text-[10px] uppercase font-black tracking-widest text-gray-500 mb-2">Meeting ID</label>
-            <input
-              type="text"
-              value={meetingId}
-              onChange={(e) => setMeetingId(e.target.value)}
-              className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-center font-mono text-orange-500 focus:outline-none focus:border-orange-500/50 transition-colors"
-              placeholder="e.g. DEAL_FEB"
-            />
+      {!inRoom ? (
+        <div className="max-w-7xl mx-auto h-[80vh] flex flex-col items-center justify-center text-center relative z-10">
+          {/* Logo/Title */}
+          <div className="mb-12 opacity-0 animate-fade-in-up">
+            <h1 className="text-7xl font-black tracking-tighter uppercase italic mb-4 bg-gradient-to-r from-orange-500 via-orange-400 to-orange-600 bg-clip-text text-transparent animate-gradient-shift">
+              Harvest
+            </h1>
+            <div className="flex items-center justify-center gap-2 mb-6">
+              <div className="h-px w-12 bg-gradient-to-r from-transparent to-orange-500/50" />
+              <p className="text-xs uppercase tracking-[0.3em] text-orange-500/60 font-bold">AI-Powered Negotiation</p>
+              <div className="h-px w-12 bg-gradient-to-l from-transparent to-orange-500/50" />
+            </div>
+            <p className="text-gray-400 text-sm max-w-md mx-auto leading-relaxed">
+              Stateless decentralized agents for agricultural negotiation. Select your role to begin.
+            </p>
           </div>
 
-          <div className="flex gap-8">
+          {/* Meeting ID Input */}
+          <div className="mb-16 w-full max-w-sm mx-auto opacity-0 animate-fade-in-up stagger-2">
+            <label className="block text-[10px] uppercase font-black tracking-widest text-gray-500 mb-3 flex items-center justify-center gap-2">
+              <span className="w-1 h-1 rounded-full bg-orange-500 animate-pulse" />
+              Meeting ID
+              <span className="w-1 h-1 rounded-full bg-orange-500 animate-pulse" />
+            </label>
+            <div className="relative group">
+              <input
+                type="text"
+                value={meetingId}
+                onChange={(e) => setMeetingId(e.target.value)}
+                className="w-full bg-white/5 border border-white/10 rounded-2xl px-6 py-4 text-center font-mono text-orange-500 focus:outline-none focus:border-orange-500/50 focus:bg-white/10 transition-all duration-300 backdrop-blur-sm group-hover:border-orange-500/30"
+                placeholder="e.g. HARVEST_DEAL_2026"
+              />
+              <div className="absolute inset-0 rounded-2xl bg-gradient-to-r from-orange-500/0 via-orange-500/5 to-orange-500/0 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+            </div>
+          </div>
+
+          {/* Persona Selection */}
+          <div className="flex gap-8 opacity-0 animate-fade-in-scale stagger-3">
+            {/* Halima Button */}
             <button
               onClick={() => enterPresenceRoom("Halima")}
-              className="group relative px-12 py-6 bg-orange-500 rounded-2xl hover:scale-105 transition-all text-left"
+              className="group relative px-16 py-8 bg-gradient-to-br from-orange-500 to-orange-600 rounded-3xl hover:scale-105 active:scale-95 transition-all duration-300 text-left overflow-hidden shadow-2xl shadow-orange-500/20"
             >
-              <span className="block text-black font-black uppercase tracking-widest text-xl">Halima</span>
-              <span className="block text-black/60 text-xs font-bold uppercase tracking-tight">The Seller (Farmer)</span>
-              <div className="absolute -inset-2 bg-orange-500/20 blur-xl opacity-0 group-hover:opacity-100 transition-opacity" />
+              {/* Shimmer Effect */}
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+
+              {/* Content */}
+              <div className="relative z-10">
+                <span className="block text-black font-black uppercase tracking-widest text-2xl mb-2">Halima</span>
+                <span className="block text-black/70 text-xs font-bold uppercase tracking-tight">The Seller • Farmer</span>
+              </div>
+
+              {/* Glow */}
+              <div className="absolute -inset-3 bg-orange-500/30 blur-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-500 -z-10" />
             </button>
 
+            {/* Alex Button */}
             <button
               onClick={() => enterPresenceRoom("Alex")}
-              className="group relative px-12 py-6 bg-white/5 border border-white/10 rounded-2xl hover:scale-105 transition-all text-left"
+              className="group relative px-16 py-8 bg-white/5 backdrop-blur-md border-2 border-white/10 rounded-3xl hover:scale-105 active:scale-95 transition-all duration-300 text-left overflow-hidden shadow-2xl hover:border-blue-500/30"
             >
-              <span className="block text-white font-black uppercase tracking-widest text-xl">Alex</span>
-              <span className="block text-white/40 text-xs font-bold uppercase tracking-tight">The Buyer (Commodity Agent)</span>
-              <div className="absolute -inset-2 bg-white/5 blur-xl opacity-0 group-hover:opacity-100 transition-opacity" />
+              {/* Shimmer Effect */}
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+
+              {/* Content */}
+              <div className="relative z-10">
+                <span className="block text-white font-black uppercase tracking-widest text-2xl mb-2">Alex</span>
+                <span className="block text-white/50 text-xs font-bold uppercase tracking-tight">The Buyer • Commodity Agent</span>
+              </div>
+
+              {/* Glow */}
+              <div className="absolute -inset-3 bg-blue-500/20 blur-2xl opacity-0 group-hover:opacity-100 transition-opacity duration-500 -z-10" />
             </button>
+          </div>
+
+          {/* Decorative Elements */}
+          <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex gap-2 opacity-0 animate-fade-in-up stagger-4">
+            {[...Array(3)].map((_, i) => (
+              <div
+                key={i}
+                className="w-1.5 h-1.5 rounded-full bg-orange-500/30"
+                style={{ animationDelay: `${i * 0.2}s` }}
+              />
+            ))}
           </div>
         </div>
       ) : (
