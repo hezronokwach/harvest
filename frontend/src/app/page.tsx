@@ -58,6 +58,11 @@ export default function Home() {
   const [incomingCallFrom, setIncomingCallFrom] = useState<string | null>(null);
   const [outgoingCallTo, setOutgoingCallTo] = useState<string | null>(null);
 
+  // Bidding states
+  const [halimaOffer, setHalimaOffer] = useState<any>(null);
+  const [alexOffer, setAlexOffer] = useState<any>(null);
+  const [dealFinalized, setDealFinalized] = useState(false);
+
   // Cross-persona online status
   const [halimaOnlineState, setHalimaOnlineState] = useState(false);
   const [alexOnlineState, setAlexOnlineState] = useState(false);
@@ -380,6 +385,12 @@ export default function Home() {
             halimaOnlineState={halimaOnlineState}
             alexOnlineState={alexOnlineState}
             setLkToken={setLkToken}
+            halimaOffer={halimaOffer}
+            setHalimaOffer={setHalimaOffer}
+            alexOffer={alexOffer}
+            setAlexOffer={setAlexOffer}
+            dealFinalized={dealFinalized}
+            setDealFinalized={setDealFinalized}
           />
           <RoomAudioRenderer />
         </LiveKitRoom>
@@ -415,6 +426,12 @@ function DashboardContent({
   halimaOnlineState,
   alexOnlineState,
   setLkToken,
+  halimaOffer,
+  setHalimaOffer,
+  alexOffer,
+  setAlexOffer,
+  dealFinalized,
+  setDealFinalized,
 }: {
   persona: string;
   negotiationProgress: number;
@@ -442,6 +459,12 @@ function DashboardContent({
   halimaOnlineState: boolean;
   alexOnlineState: boolean;
   setLkToken: (token: string | null) => void;
+  halimaOffer: any;
+  setHalimaOffer: (offer: any) => void;
+  alexOffer: any;
+  setAlexOffer: (offer: any) => void;
+  dealFinalized: boolean;
+  setDealFinalized: (finalized: boolean) => void;
 }) {
   const room = useRoomContext();
 
@@ -564,6 +587,14 @@ function DashboardContent({
             return next.length > 50 ? next.slice(-50) : next;
           });
         }
+      } else if (data.type === "offer_update") {
+        if (data.agent === "Halima") setHalimaOffer(data.offer);
+        if (data.agent === "Alex") setAlexOffer(data.offer);
+        setCallStatus(`Offer updated by ${data.agent}`);
+        setTimeout(() => setCallStatus(""), 3000);
+      } else if (data.type === "DEAL_FINALIZED") {
+        setDealFinalized(true);
+        setCallStatus(`🤝 DEAL FINALIZED BY ${data.agent.toUpperCase()}!`);
       }
     };
 
@@ -825,9 +856,10 @@ function DashboardContent({
           </div>
         </div>
 
-        {/* Waveform - Right Side */}
-        <div className="col-span-6">
-          <div className="h-[calc(100vh-280px)] rounded-xl bg-gradient-to-t from-orange-500/5 to-transparent border border-white/5 flex flex-col items-center justify-center relative overflow-hidden">
+        {/* Right Side - Waveform + Bidding */}
+        <div className="col-span-6 h-[calc(100vh-280px)] flex flex-col gap-6">
+          {/* Waveform - Top Half */}
+          <div className="h-2/5 rounded-xl bg-gradient-to-t from-orange-500/5 to-transparent border border-white/5 flex flex-col items-center justify-center relative overflow-hidden">
             <div className="absolute top-4 left-4 flex items-center gap-3">
               <div className="text-[8px] font-bold text-orange-500 uppercase tracking-[0.3em]">Negotiation Waveform</div>
               <div className="flex gap-0.5">
@@ -837,7 +869,7 @@ function DashboardContent({
               </div>
             </div>
 
-            <div className="flex gap-1 items-center z-10">
+            <div className="flex gap-1 items-center z-10 scale-75 lg:scale-90">
               {hasMounted && barHeights.orange.map((height: number, i: number) => (
                 <div
                   key={i}
@@ -849,32 +881,14 @@ function DashboardContent({
                   }}
                 />
               ))}
-              <div className="mx-8 flex flex-col items-center">
-                <p className="text-[10px] font-mono text-gray-600 uppercase tracking-[0.2em] mb-2">Live Audio Matrix</p>
-                <div className="w-32 h-[2px] bg-white/5 rounded-full relative">
+              <div className="mx-4 flex flex-col items-center">
+                <div className="w-24 h-[2px] bg-white/5 rounded-full relative mb-1">
                   <div
                     className="absolute top-0 left-0 h-full bg-orange-500 transition-all duration-500 ease-out"
                     style={{ width: `${negotiationProgress}%` }}
                   />
                 </div>
-                <p className="mt-2 text-[8px] font-mono text-orange-500/50 uppercase tracking-widest">Efficiency: {Math.round(negotiationProgress)}%</p>
-
-                {/* Round Progress Indicator */}
-                <div className="mt-6 flex flex-col items-center">
-                  <p className="text-[8px] font-mono text-gray-600 uppercase mb-2">Round Progress</p>
-                  <div className="flex gap-1.5">
-                    {Array.from({ length: timeline.maxRounds }).map((_, i) => (
-                      <div
-                        key={i}
-                        className={`w-2 h-2 rounded-full transition-all duration-500 ${i < timeline.round ? "bg-orange-500 shadow-[0_0_8px_rgba(249,115,22,0.4)]" : "bg-white/10"
-                          }`}
-                      />
-                    ))}
-                  </div>
-                  <p className="mt-2 text-xs font-black tracking-tighter text-white">
-                    {timeline.round} <span className="text-[10px] text-gray-600">/ {timeline.maxRounds}</span>
-                  </p>
-                </div>
+                <p className="text-[8px] font-mono text-orange-500/50 uppercase tracking-widest">Efficiency: {Math.round(negotiationProgress)}%</p>
               </div>
               {hasMounted && barHeights.blue.map((height: number, i: number) => (
                 <div
@@ -887,6 +901,103 @@ function DashboardContent({
                   }}
                 />
               ))}
+            </div>
+          </div>
+
+          {/* Bidding - Bottom Half */}
+          <div className="h-3/5 rounded-3xl bg-white/5 border border-white/10 p-8 relative overflow-hidden group">
+            {/* Ambient Background Gradient for Bidding */}
+            <div className="absolute -top-24 -right-24 w-64 h-64 bg-orange-500/10 rounded-full blur-[100px] group-hover:bg-orange-500/20 transition-all duration-700" />
+            <div className="absolute -bottom-24 -left-24 w-64 h-64 bg-blue-500/10 rounded-full blur-[100px] group-hover:bg-blue-500/20 transition-all duration-700" />
+
+            {/* Header */}
+            <div className="flex justify-between items-center mb-10 relative z-10">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-orange-500/20 to-red-500/20 flex items-center justify-center border border-white/10 group-hover:scale-110 transition-transform duration-500">
+                  <span className="text-2xl animate-pulse">🤝</span>
+                </div>
+                <div>
+                  <h3 className="text-xl font-black italic tracking-tighter uppercase italic">Live Bidding Matrix</h3>
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-orange-500 animate-ping" />
+                    <span className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Real-time sync</span>
+                  </div>
+                </div>
+              </div>
+
+              {dealFinalized && (
+                <div className="px-6 py-2 bg-green-500 rounded-full text-black text-[10px] font-black uppercase tracking-[0.2em] shadow-[0_0_20px_rgba(34,197,94,0.4)] animate-bounce">
+                  Deal Closed
+                </div>
+              )}
+            </div>
+
+            {/* Offer Comparison Room */}
+            <div className="grid grid-cols-2 gap-6 relative z-10">
+              {/* Halima Offer */}
+              <div className={`p-6 rounded-3xl border transition-all duration-500 ${halimaOffer ? "bg-orange-500/10 border-orange-500/30 shadow-[0_0_30px_rgba(249,115,22,0.1)]" : "bg-white/5 border-white/5 opacity-40 grayscale"}`}>
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-2 h-2 rounded-full bg-orange-500" />
+                  <span className="text-[10px] font-black uppercase tracking-widest text-orange-500">Halima's Terms</span>
+                </div>
+                {halimaOffer ? (
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-end">
+                      <span className="text-[10px] text-gray-500 uppercase">Per KG</span>
+                      <span className="text-3xl font-black tracking-tighter text-white animate-fade-in-up">${halimaOffer.price}</span>
+                    </div>
+                    <div className="space-y-3 pt-4 border-t border-white/5">
+                      <div className="flex justify-between text-[10px] uppercase font-bold tracking-wider">
+                        <span className="text-gray-500 italic">Delivery</span>
+                        <span className={halimaOffer.delivery_included ? "text-green-400" : "text-red-400"}>{halimaOffer.delivery_included ? "Included" : "Excluded"}</span>
+                      </div>
+                      <div className="flex justify-between text-[10px] uppercase font-bold tracking-wider">
+                        <span className="text-gray-500 italic">Payment</span>
+                        <span className="text-blue-400">{halimaOffer.payment_terms.replace("_", " ")}</span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="h-24 flex items-center justify-center border-2 border-dashed border-white/10 rounded-2xl">
+                    <span className="text-[10px] uppercase tracking-widest font-bold text-gray-600 animate-pulse">Awaiting Offer</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Alex Offer */}
+              <div className={`p-6 rounded-3xl border transition-all duration-500 ${alexOffer ? "bg-blue-500/10 border-blue-500/30 shadow-[0_0_30px_rgba(59,130,246,0.1)]" : "bg-white/5 border-white/5 opacity-40 grayscale"}`}>
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-2 h-2 rounded-full bg-blue-500" />
+                  <span className="text-[10px] font-black uppercase tracking-widest text-blue-500">Alex's Terms</span>
+                </div>
+                {alexOffer ? (
+                  <div className="space-y-4">
+                    <div className="flex justify-between items-end">
+                      <span className="text-[10px] text-gray-500 uppercase">Per KG</span>
+                      <span className="text-3xl font-black tracking-tighter text-white animate-fade-in-up">${alexOffer.price}</span>
+                    </div>
+                    <div className="space-y-3 pt-4 border-t border-white/5">
+                      <div className="flex justify-between text-[10px] uppercase font-bold tracking-wider">
+                        <span className="text-gray-500 italic">Delivery</span>
+                        <span className={alexOffer.delivery_included ? "text-green-400" : "text-red-400"}>{alexOffer.delivery_included ? "Included" : "Excluded"}</span>
+                      </div>
+                      <div className="flex justify-between text-[10px] uppercase font-bold tracking-wider">
+                        <span className="text-gray-500 italic">Payment</span>
+                        <span className="text-blue-400">{alexOffer.payment_terms.replace("_", " ")}</span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="h-24 flex items-center justify-center border-2 border-dashed border-white/10 rounded-2xl">
+                    <span className="text-[10px] uppercase tracking-widest font-bold text-gray-600 animate-pulse">Awaiting Offer</span>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Bottom Status Branding */}
+            <div className="mt-8 flex justify-center opacity-30 group-hover:opacity-100 transition-opacity duration-700">
+              <span className="text-[8px] uppercase tracking-[0.5em] font-black text-gray-400 italic">Harvest Protocol v3.2 // Secure Negotiation Environment</span>
             </div>
           </div>
         </div>

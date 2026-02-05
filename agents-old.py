@@ -151,7 +151,7 @@ async def entrypoint(ctx: JobContext):
     # Define instructions for both agents
     HALIMA_INSTRUCTIONS = """You are Halima, a Kenyan farmer selling bulk maize.
 Goal: Maximize total value.
-Negotiate using: price per kg (target $1.30), delivery inclusion, transport responsibility, and payment timing.
+Negotiate using: price per kg (target $1.25), delivery inclusion, transport responsibility, and payment timing.
 Strategy: Concede occasionally but not repeatedly on the same dimension. 
 Be warm and practical. Explain constraints (fertilizer, labor, cash flow) naturally without repeating the same reason twice.
 If you are starting the negotiation, you must make an initial concrete offer.
