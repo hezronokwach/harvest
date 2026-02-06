@@ -46,8 +46,18 @@ export default function Home() {
   const [meetingId, setMeetingId] = useState<string>("HARVEST_DEAL_1");
 
 
-  const [timeline, setTimeline] = useState<Timeline>({ turn: 0, round: 0, maxRounds: 8 });
+  const [timeline, setTimeline] = useState<Timeline>({ turn: 0, round: 0, maxRounds: 15 });
   const [negotiationProgress, setNegotiationProgress] = useState(0);
+
+  const resetNegotiationState = () => {
+    setTimeline({ turn: 0, round: 0, maxRounds: 15 });
+    setNegotiationProgress(0);
+    setHalimaOffer(null);
+    setAlexOffer(null);
+    setDealFinalized(false);
+    setThoughts([]);
+    setTranscripts([]);
+  };
   const [barHeights, setBarHeights] = useState({ orange: [0, 0, 0], blue: [0, 0, 0] });
   const [thoughts, setThoughts] = useState<Array<{ id: string; agent: string; text: string; type: "strategy" | "insight" | "warning" }>>([]);
   const [transcripts, setTranscripts] = useState<Array<{ id: string; agent: string; text: string }>>([]);
@@ -71,7 +81,7 @@ export default function Home() {
   useEffect(() => {
     const timer = setTimeout(() => setHasMounted(true), 0);
     return () => clearTimeout(timer);
-  });
+  }, []);
 
   useEffect(() => {
     setBarHeights({
@@ -134,6 +144,7 @@ export default function Home() {
 
       // Force disconnect from presence room
       setInRoom(false);
+      resetNegotiationState();
 
       // Wait a moment for disconnect to complete
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -214,7 +225,7 @@ export default function Home() {
       console.log(`📡 [API] /call/accept response:`, data);
 
       setCallState("connected");
-      setNegotiationProgress(10);
+      resetNegotiationState();
       setLkToken(null);
       setTimeout(() => {
         fetch(`http://localhost:8000/livekit/token?participant_name=User_${persona}&persona=${persona}&room_name=${data.room}`)
@@ -350,6 +361,7 @@ export default function Home() {
         </div>
       ) : (
         <LiveKitRoom
+          key={lkToken}
           token={lkToken || ""}
           serverUrl={process.env.NEXT_PUBLIC_LIVEKIT_URL}
           connect={true}
@@ -391,6 +403,7 @@ export default function Home() {
             setAlexOffer={setAlexOffer}
             dealFinalized={dealFinalized}
             setDealFinalized={setDealFinalized}
+            resetNegotiationState={resetNegotiationState}
           />
           <RoomAudioRenderer />
         </LiveKitRoom>
@@ -432,10 +445,11 @@ function DashboardContent({
   setAlexOffer,
   dealFinalized,
   setDealFinalized,
+  resetNegotiationState,
 }: {
   persona: string;
   negotiationProgress: number;
-  setNegotiationProgress: (p: number) => void;
+  setNegotiationProgress: React.Dispatch<React.SetStateAction<number>>;
   timeline: Timeline;
   setTimeline: React.Dispatch<React.SetStateAction<Timeline>>;
   barHeights: { orange: number[]; blue: number[] };
@@ -446,13 +460,13 @@ function DashboardContent({
   hasMounted: boolean;
   onStartNegotiation: () => void;
   callStatus: string;
-  setCallStatus: (s: string) => void;
+  setCallStatus: React.Dispatch<React.SetStateAction<string>>;
   callState: "idle" | "calling" | "ringing" | "connected";
-  setCallState: (s: "idle" | "calling" | "ringing" | "connected") => void;
+  setCallState: React.Dispatch<React.SetStateAction<"idle" | "calling" | "ringing" | "connected">>;
   incomingCallFrom: string | null;
-  setIncomingCallFrom: (p: string | null) => void;
+  setIncomingCallFrom: React.Dispatch<React.SetStateAction<string | null>>;
   outgoingCallTo: string | null;
-  setOutgoingCallTo: (p: string | null) => void;
+  setOutgoingCallTo: React.Dispatch<React.SetStateAction<string | null>>;
   initiateCall: () => void;
   acceptCall: () => void;
   declineCall: () => void;
@@ -460,13 +474,18 @@ function DashboardContent({
   alexOnlineState: boolean;
   setLkToken: (token: string | null) => void;
   halimaOffer: any;
-  setHalimaOffer: (offer: any) => void;
+  setHalimaOffer: React.Dispatch<React.SetStateAction<any>>;
   alexOffer: any;
-  setAlexOffer: (offer: any) => void;
+  setAlexOffer: React.Dispatch<React.SetStateAction<any>>;
   dealFinalized: boolean;
-  setDealFinalized: (finalized: boolean) => void;
+  setDealFinalized: React.Dispatch<React.SetStateAction<boolean>>;
+  resetNegotiationState: () => void;
 }) {
   const room = useRoomContext();
+
+  // Sync-capable state for waveforms (driven by DataPackets + LiveKit VAD)
+  const [halimaIsSpeaking, setHalimaIsSpeaking] = useState(false);
+  const [alexIsSpeaking, setAlexIsSpeaking] = useState(false);
 
   // Track-based role mapping for agents (LiveKit agent IDs are randomized)
   const tracks = useTracks(
@@ -474,190 +493,203 @@ function DashboardContent({
     { onlySubscribed: true }
   );
 
-  const agentTracks = tracks.filter(t => t.participant.identity.startsWith("agent-"));
+  const agentTracks = React.useMemo(() =>
+    tracks.filter(t => {
+      const id = t.participant.identity.toLowerCase();
+      // Broad check for typical agent identity patterns in LiveKit
+      return id.startsWith("agent-") || id.includes("-worker") || id.startsWith("aj_");
+    }),
+    [tracks]
+  );
 
-  // Create stable participant ID to agent name mapping using useMemo
+  // Create stable participant ID to agent name mapping using metadata or identity
   const participantToAgent = React.useMemo(() => {
     const mapping = new Map<string, string>();
 
-    if (agentTracks.length >= 2) {
-      // First agent = Halima, Second agent = Alex
-      mapping.set(agentTracks[0].participant.identity, "Halima");
-      mapping.set(agentTracks[1].participant.identity, "Alex");
+    agentTracks.forEach(track => {
+      const p = track.participant;
+      let name = "";
 
-      console.log("🗺️ Agent Mapping Created:", {
-        halima: agentTracks[0].participant.identity,
-        alex: agentTracks[1].participant.identity,
-      });
-    } else if (agentTracks.length === 1) {
-      // If only one agent, assume it's Halima (seller starts first)
-      mapping.set(agentTracks[0].participant.identity, "Halima");
-      console.log("🗺️ Partial Mapping (Halima only):", agentTracks[0].participant.identity);
+      // 1. Try metadata (Persona is set in main.py dispatch)
+      try {
+        if (p.metadata) {
+          const meta = JSON.parse(p.metadata);
+          if (meta.persona) name = meta.persona;
+        }
+      } catch (e) { }
+
+      // 2. Fallback to identity string search
+      if (!name) {
+        const id = p.identity.toLowerCase();
+        if (id.includes("halima") || id.includes("juma")) name = "Halima";
+        else if (id.includes("alex")) name = "Alex";
+      }
+
+      if (name) {
+        mapping.set(p.identity, name);
+      }
+    });
+
+    if (mapping.size > 0) {
+      console.log("🗺️ Robust Agent Mapping:", Object.fromEntries(mapping));
     }
-
     return mapping;
-  }, [agentTracks.length, agentTracks[0]?.participant.identity, agentTracks[1]?.participant.identity]);
+  }, [agentTracks]);
+
+  // Track room name to ensure we only clear transcripts on meaningful room switches
+  const [lastRoomName, setLastRoomName] = useState("");
 
   useEffect(() => {
     if (!room) return;
+    let syncTimeout: NodeJS.Timeout;
+
+    const sendSyncRequest = () => {
+      clearTimeout(syncTimeout);
+      syncTimeout = setTimeout(() => {
+        if (room.state !== "connected") return;
+        const lp = room.localParticipant;
+        if (!lp) return;
+
+        console.warn("📤 Sending SYNC_REQUEST to Agents (Delayed)...");
+        try {
+          lp.publishData(
+            new TextEncoder().encode(JSON.stringify({ type: "SYNC_REQUEST" })),
+            { reliable: true }
+          );
+        } catch (e) {
+          console.error("Failed to send SYNC_REQUEST:", e);
+        }
+      }, 1500);
+    };
+
+    if (room.state === "connected" && lastRoomName !== room.name) {
+      console.warn(`🎯 NEW ROOM CONNECTED: ${room.name}. Resetting state.`);
+      setTranscripts([]);
+      setLastRoomName(room.name);
+      sendSyncRequest();
+    }
+
+    const getAgentFromIdentity = (id?: string, name?: string) => {
+      const lowerId = id?.toLowerCase() || "";
+      const lowerName = name?.toLowerCase() || "";
+      if (lowerId.includes("halima") || lowerId.includes("juma") || lowerName.includes("halima")) return "Halima";
+      if (lowerId.includes("alex") || lowerName.includes("alex")) return "Alex";
+      return "Agent";
+    };
 
     const onDataReceived = (payload: Uint8Array, participant?: Participant) => {
       const raw = new TextDecoder().decode(payload);
-      console.log(`📩 [SIGNAL] Data received in room ${room.name}:`, raw, {
-        from: participant?.identity || participant?.sid,
-      });
-
-      let data: any;
       try {
-        data = JSON.parse(raw);
-        console.warn("✅ PARSED DATA:", data);
+        const data = JSON.parse(raw);
+        console.warn("📦 DATA PACKET:", data);
 
         if (data.type === "CALL_OFFER") {
-          console.log(`🔔 [SIGNAL] Incoming call from ${data.from}`);
           setIncomingCallFrom(data.from);
           setCallState("ringing");
           return;
         } else if (data.type === "CALL_ACCEPTED") {
-          console.log(`🤝 [SIGNAL] Call accepted by ${data.by}. Joining room: ${data.room}`);
           setCallState("connected");
-          setNegotiationProgress(10);
-
-          // Disconnect from current room first
-          console.log(`🔌 [SIGNAL] Disconnecting from ${room.name} to switch to call room...`);
+          resetNegotiationState();
           room.disconnect();
-
-          // Wait for disconnect, then join call room
           setTimeout(() => {
             fetch(`http://localhost:8000/livekit/token?participant_name=User_${persona}&persona=${persona}&room_name=${data.room}`)
               .then(res => res.json())
               .then(d => {
-                console.log(`🔑 [SIGNAL] Joined call room ${data.room} with new token.`);
                 setLkToken(d.token);
               });
           }, 1000);
           return;
         } else if (data.type === "CALL_DECLINED") {
-          console.warn(`✖️ [SIGNAL] Call declined by ${data.by}`);
           setCallStatus(`${data.by} declined the call`);
           setCallState("idle");
           setOutgoingCallTo(null);
           setTimeout(() => setCallStatus(""), 3000);
           return;
         }
-      } catch (e) {
-        console.error("❌ [SIGNAL] Failed to parse data message:", e);
-        return;
-      }
 
-      // For price_update, trust the agent field from backend
-      // For other messages, derive from participant
-      const agentName = data.type === "price_update"
-        ? data.agent
-        : (participant?.name || (participant?.identity.includes("halima") || participant?.identity.includes("juma") || participant?.name?.toLowerCase().includes("halima") ? "Halima" : "Alex"));
+        // --- NEGOTIATION SYNC LOGIC ---
+        const agentName = (data.type === "offer_update" || data.type === "DEAL_FINALIZED" || data.type === "price_update" || data.type === "thought")
+          ? data.agent
+          : (participantToAgent.get(participant?.identity || "") || getAgentFromIdentity(participant?.identity, participant?.name));
 
-      if (data.type === "thought") {
-        const id = `${agentName}-${crypto.randomUUID()}`;
-        setThoughts((prev: Thought[]) => [
-          { id, agent: agentName, text: data.text, type: "insight" },
-          ...prev.slice(0, 9),
-        ]);
-      } else if (data.type === "negotiation_timeline") {
-        console.warn("🟢 TIMELINE EVENT HIT", data);
-        console.warn("🟢 SETTING TIMELINE STATE", {
-          before: timeline,
-          incoming: data,
-        });
-
-        setTimeline({
-          turn: data.turn,
-          round: data.round,
-          maxRounds: data.max_rounds,
-        });
-        // Also sync global progress for the waveform
-        const progress = (data.round / data.max_rounds) * 100;
-        setNegotiationProgress(progress);
-      } else if (data.type === "SPEECH" || data.type === "HALIMA_DONE" || data.type === "ALEX_SPEECH") {
-        if (data.text) {
-          const speaker = data.speaker || agentName;
-          setTranscripts(prev => {
-            const next = [
-              ...prev,
-              { id: crypto.randomUUID(), agent: speaker, text: data.text }
-            ];
-            return next.length > 50 ? next.slice(-50) : next;
+        if (data.type === "thought") {
+          const id = `${agentName}-${crypto.randomUUID()}`;
+          setThoughts((prev: Thought[]) => [
+            { id, agent: agentName || "Agent", text: data.text, type: "insight" },
+            ...prev.slice(0, 9),
+          ]);
+        } else if (data.type === "negotiation_timeline") {
+          setTimeline((prev: Timeline) => {
+            if (prev.turn === data.turn && prev.round === data.round && prev.maxRounds === data.max_rounds) return prev;
+            return { turn: data.turn, round: data.round, maxRounds: data.max_rounds };
           });
+          setNegotiationProgress((prev: number) => {
+            const next = (data.round / data.max_rounds) * 100;
+            return next === prev ? prev : next;
+          });
+        } else if (data.type === "SPEECH" || data.type === "HALIMA_DONE" || data.type === "ALEX_SPEECH") {
+          if (data.text) {
+            const speaker = data.speaker || agentName || "Agent";
+            setTranscripts(prev => {
+              if (prev.some(t => t.text === data.text && t.agent === speaker)) return prev;
+              const next = [...prev, { id: crypto.randomUUID(), agent: speaker, text: data.text }];
+              return next.length > 50 ? next.slice(-50) : next;
+            });
+          }
+        } else if (data.type === "SPEECH_STATE") {
+          if (data.agent === "Halima") setHalimaIsSpeaking((prev: boolean) => prev === data.is_speaking ? prev : data.is_speaking);
+          if (data.agent === "Alex") setAlexIsSpeaking((prev: boolean) => prev === data.is_speaking ? prev : data.is_speaking);
+        } else if (data.type === "offer_update") {
+          console.warn("💰 OFFER SYNC RECEIVED:", data);
+          if (data.agent === "Halima") setHalimaOffer((prev: any) => JSON.stringify(prev) === JSON.stringify(data.offer) ? prev : data.offer);
+          if (data.agent === "Alex") setAlexOffer((prev: any) => JSON.stringify(prev) === JSON.stringify(data.offer) ? prev : data.offer);
+          setCallStatus(`Offer updated by ${data.agent}`);
+          setTimeout(() => setCallStatus(""), 3000);
+        } else if (data.type === "DEAL_FINALIZED") {
+          setDealFinalized(true);
+          setCallStatus(`🤝 DEAL FINALIZED BY ${data.agent.toUpperCase()}!`);
         }
-      } else if (data.type === "offer_update") {
-        if (data.agent === "Halima") setHalimaOffer(data.offer);
-        if (data.agent === "Alex") setAlexOffer(data.offer);
-        setCallStatus(`Offer updated by ${data.agent}`);
-        setTimeout(() => setCallStatus(""), 3000);
-      } else if (data.type === "DEAL_FINALIZED") {
-        setDealFinalized(true);
-        setCallStatus(`🤝 DEAL FINALIZED BY ${data.agent.toUpperCase()}!`);
+      } catch (e) {
+        console.error("❌ [SIGNAL] Data Error:", e);
       }
     };
 
-    const handleTranscription = (
-      segments: TranscriptionSegment[],
-      participant?: Participant
-    ) => {
+    const handleTranscription = (segments: TranscriptionSegment[], participant?: Participant) => {
       if (!participant) return;
-
-      // Use participant mapping to determine agent name
-      const agentName = participantToAgent.get(participant.identity) || "Alex";
-
-      console.log("📝 Transcript from:", {
-        identity: participant.identity,
-        name: participant.name,
-        mappedTo: agentName,
-        mapSize: participantToAgent.size,
-      });
-
+      const agentName = participantToAgent.get(participant.identity) || getAgentFromIdentity(participant.identity, participant.name);
       const finalSegments = segments.filter(s => s.final && s.text.trim());
-
       if (finalSegments.length === 0) return;
 
       setTranscripts(prev => {
-        const next = [
-          ...prev,
-          ...finalSegments.map(segment => ({
-            id: crypto.randomUUID(),
-            agent: agentName,
-            text: segment.text,
-          })),
-        ];
-
-        // ✅ cap buffer to last 50 entries
+        const next = [...prev, ...finalSegments.map(segment => ({ id: crypto.randomUUID(), agent: agentName, text: segment.text }))];
         return next.length > 50 ? next.slice(-50) : next;
       });
     };
 
-    room.on(RoomEvent.Connected, () => {
-      console.warn("✅ ROOM CONNECTED");
-    });
-
+    room.on(RoomEvent.Connected, sendSyncRequest);
     room.on(RoomEvent.DataReceived, onDataReceived);
     room.on(RoomEvent.TranscriptionReceived, handleTranscription);
 
     return () => {
+      clearTimeout(syncTimeout);
+      room.off(RoomEvent.Connected, sendSyncRequest);
       room.off(RoomEvent.DataReceived, onDataReceived);
       room.off(RoomEvent.TranscriptionReceived, handleTranscription);
     };
-  }, [room, setThoughts, setTranscripts, setTimeline, setNegotiationProgress, timeline, participantToAgent]);
+  }, [room, setThoughts, setTranscripts, setTimeline, setNegotiationProgress, participantToAgent, persona, setLkToken, lastRoomName]);
 
   useEffect(() => {
     console.warn("🔁 TIMELINE STATE CHANGED:", timeline);
   }, [timeline]);
 
-  const halimaTrack = agentTracks.find(t => t.participant.identity.includes("halima") || (t.participant.name?.toLowerCase().includes("halima")));
-  const alexTrack = agentTracks.find(t => t.participant.identity.includes("alex") || (t.participant.name?.toLowerCase().includes("alex")));
+  const halimaTrack = agentTracks.find(t => participantToAgent.get(t.participant.identity) === "Halima");
+  const alexTrack = agentTracks.find(t => participantToAgent.get(t.participant.identity) === "Alex");
 
   const halimaOnline = halimaOnlineState || Boolean(halimaTrack) || callState === "connected";
   const alexOnline = alexOnlineState || Boolean(alexTrack) || callState === "connected";
 
-  const halimaSpeaking = Boolean(halimaTrack?.participant.isSpeaking);
-  const alexSpeaking = Boolean(alexTrack?.participant.isSpeaking);
+  const halimaSpeaking = halimaIsSpeaking || Boolean(halimaTrack?.participant.isSpeaking);
+  const alexSpeaking = alexIsSpeaking || Boolean(alexTrack?.participant.isSpeaking);
 
   const isHalimaUser = persona === "Halima";
   const isAlexUser = persona === "Alex";
