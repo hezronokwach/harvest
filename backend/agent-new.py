@@ -48,73 +48,6 @@ class NegotiationAgent(Agent):
         super().__init__(instructions=instructions)
         self.persona = persona
         self.ctx = ctx
-        self.current_offer = None
-        self.deal_finalized = False
-        self.round = 1
-        self.max_rounds = 15
-
-    @llm.function_tool
-    async def propose_offer(
-        self,
-        price: Annotated[float, Field(description="USD per kg")],
-        delivery_included: Annotated[bool, Field(description="Whether delivery is included")],
-        transport_paid_by: Annotated[str, Field(description="seller or buyer")],
-        payment_terms: Annotated[str, Field(description="cash, 7_days, or 14_days")],
-    ) -> str:
-        """Tool for agents to propose a concrete multi-lever offer. Call this when you want to make or update an offer."""
-        offer = {
-            "price": round(price, 2),
-            "delivery_included": delivery_included,
-            "transport_paid_by": transport_paid_by,
-            "payment_terms": payment_terms,
-        }
-        self.current_offer = offer
-        self.round = min(self.round + 1, self.max_rounds)
-        
-        logger.info(f"📦 [OFFER] {self.persona} (Round {self.round}): {offer}")
-        
-        try:
-            # Broadcast offer update
-            await self.ctx.room.local_participant.publish_data(
-                json.dumps({
-                    "type": "offer_update",
-                    "agent": self.persona,
-                    "offer": offer,
-                }).encode(),
-                reliable=True
-            )
-            # Also broadcast timeline update to sync progress bar
-            await self.ctx.room.local_participant.publish_data(
-                json.dumps({
-                    "type": "negotiation_timeline",
-                    "turn": self.persona,
-                    "round": self.round,
-                    "max_rounds": self.max_rounds,
-                }).encode(),
-                reliable=True
-            )
-            return f"Offer published successfully for round {self.round}."
-        except Exception as e:
-            logger.error(f"❌ Failed to publish offer: {e}")
-            return f"Error publishing offer: {e}"
-
-    @llm.function_tool
-    async def finalize_deal(
-        self,
-        accepted_offer_summary: Annotated[str, Field(description="Brief summary of the offer you are accepting")]
-    ) -> str:
-        """Call this ONLY when you have reached a final agreement and both parties have verbally accepted."""
-        try:
-            await self.ctx.room.local_participant.publish_data(
-                json.dumps({
-                    "type": "DEAL_FINALIZED",
-                    "agent": self.persona,
-                    "summary": accepted_offer_summary,
-                }).encode()
-            )
-            return "Deal finalization signal sent."
-        except Exception as e:
-            return f"Error: {e}"
 
 # -------------------------------------------------
 # Server Setup
@@ -153,9 +86,6 @@ async def entrypoint(ctx: JobContext):
 CRITICAL: This is a realtime voice conversation. Keep responses very brief (1-2 sentences).
 NEGOTIATION RULES:
 - Target: $1.25/kg, Minimum: $1.15/kg.
-- Use the propose_offer tool whenever you make a concrete offer.
-- You must reach a deal within about 8 exchanges.
-- If the offer is good, say acceptance verbally AND call finalize_deal.
 - You are speaking with {('Alex' if persona == 'Halima' else 'Halima')}.
 """
     else:
@@ -164,14 +94,12 @@ NEGOTIATION RULES:
 CRITICAL: This is a realtime voice conversation. Keep responses very brief (1-2 sentences).
 NEGOTIATION RULES:
 - Target: $1.15/kg, Maximum: $1.25/kg.
-- Use the propose_offer tool whenever you make a concrete offer.
-- You must reach a deal within about 8 exchanges.
-- If the offer is good, say acceptance verbally AND call finalize_deal.
 - You are speaking with {('Alex' if persona == 'Halima' else 'Halima')}.
 """
 
     await ctx.connect()
-    # Identitiy set by LiveKit default (reverting custom metadata to fix Azure TTS XML error)
+    # Set participant metadata so the frontend can robustly identify the agent persona
+    await ctx.room.local_participant.set_metadata(json.dumps({"persona": persona}))
     
     # Create AgentSession with stable settings from working sync-agents baseline
     session = AgentSession(
@@ -204,17 +132,6 @@ NEGOTIATION RULES:
             "state": event.new_state,
             "is_speaking": event.new_state == "speaking"
         }))
-        
-        # When agent finishes speaking, increment round and broadcast timeline
-        if event.old_state == "speaking" and event.new_state != "speaking":
-            negotiation_agent.round = min(negotiation_agent.round + 1, negotiation_agent.max_rounds)
-            asyncio.create_task(broadcast_data({
-                "type": "negotiation_timeline",
-                "turn": persona,
-                "round": negotiation_agent.round,
-                "max_rounds": negotiation_agent.max_rounds,
-                "progress": (negotiation_agent.round / negotiation_agent.max_rounds) * 100
-            }))
 
     # Removed redundant on_user_transcript broadcast to prevent multi-agent 'he-said/she-said' duplication.
     # We rely on each speaker (agent or human) to broadcast/publish their own transcripts.
@@ -251,38 +168,8 @@ NEGOTIATION RULES:
             # Handle SYNC_REQUEST from newly joined browsers
             if data.get("type") == "SYNC_REQUEST":
                 logger.info(f"📥 {persona} received SYNC_REQUEST from dashboard")
-                # 1. Sync Offer
-                if negotiation_agent.current_offer:
-                     logger.info(f"📤 {persona} broadcasting sync offer: {negotiation_agent.current_offer}")
-                     asyncio.create_task(broadcast_data({
-                         "type": "offer_update",
-                         "agent": persona,
-                         "offer": negotiation_agent.current_offer
-                     }))
-                # 2. Sync Timeline
-                logger.info(f"📤 {persona} broadcasting sync timeline: Round {negotiation_agent.round}")
-                asyncio.create_task(broadcast_data({
-                    "type": "negotiation_timeline",
-                    "turn": persona,
-                    "round": negotiation_agent.round,
-                    "max_rounds": negotiation_agent.max_rounds,
-                    "progress": (negotiation_agent.round / negotiation_agent.max_rounds) * 100
-                }))
+                # Maintain basic sync if needed (transcripts etc)
                 return
-
-            if data.get("type") == "offer_update" and data.get("agent") != persona:
-                other_agent = data.get("agent")
-                offer = data.get("offer")
-                logger.info(f"🔄 {persona} syncing state: {other_agent} offered {offer}")
-                session.history.add_message(
-                    role="system",
-                    content=f"{other_agent} has proposed a concrete offer: {offer}. You can now respond to these specific terms."
-                )
-            elif data.get("type") == "DEAL_FINALIZED" and data.get("agent") != persona:
-                session.history.add_message(
-                    role="system",
-                    content=f"{data.get('agent')} has accepted the deal and finalized it. You should now conclude the call politely."
-                )
         except Exception as e:
             logger.error(f"Error in data listener: {e}")
 

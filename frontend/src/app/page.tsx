@@ -11,12 +11,6 @@ import { Participant, Track } from "livekit-client";
 import Transcript from "@/components/Transcript";
 import { RoomEvent, TranscriptionSegment, TrackPublication, RemoteParticipant } from "livekit-client";
 
-interface Timeline {
-  turn: number;
-  round: number;
-  maxRounds: number;
-}
-
 interface Thought {
   id: string;
   agent: string;
@@ -46,15 +40,9 @@ export default function Home() {
   const [meetingId, setMeetingId] = useState<string>("HARVEST_DEAL_1");
 
 
-  const [timeline, setTimeline] = useState<Timeline>({ turn: 0, round: 0, maxRounds: 15 });
-  const [negotiationProgress, setNegotiationProgress] = useState(0);
+
 
   const resetNegotiationState = () => {
-    setTimeline({ turn: 0, round: 0, maxRounds: 15 });
-    setNegotiationProgress(0);
-    setHalimaOffer(null);
-    setAlexOffer(null);
-    setDealFinalized(false);
     setThoughts([]);
     setTranscripts([]);
   };
@@ -68,10 +56,7 @@ export default function Home() {
   const [incomingCallFrom, setIncomingCallFrom] = useState<string | null>(null);
   const [outgoingCallTo, setOutgoingCallTo] = useState<string | null>(null);
 
-  // Bidding states
-  const [halimaOffer, setHalimaOffer] = useState<any>(null);
-  const [alexOffer, setAlexOffer] = useState<any>(null);
-  const [dealFinalized, setDealFinalized] = useState(false);
+
 
   // Cross-persona online status
   const [halimaOnlineState, setHalimaOnlineState] = useState(false);
@@ -372,10 +357,6 @@ export default function Home() {
         >
           <DashboardContent
             persona={persona!}
-            negotiationProgress={negotiationProgress}
-            setNegotiationProgress={setNegotiationProgress}
-            timeline={timeline}
-            setTimeline={setTimeline}
             barHeights={barHeights}
             thoughts={thoughts}
             setThoughts={setThoughts}
@@ -397,12 +378,6 @@ export default function Home() {
             halimaOnlineState={halimaOnlineState}
             alexOnlineState={alexOnlineState}
             setLkToken={setLkToken}
-            halimaOffer={halimaOffer}
-            setHalimaOffer={setHalimaOffer}
-            alexOffer={alexOffer}
-            setAlexOffer={setAlexOffer}
-            dealFinalized={dealFinalized}
-            setDealFinalized={setDealFinalized}
             resetNegotiationState={resetNegotiationState}
           />
           <RoomAudioRenderer />
@@ -414,10 +389,6 @@ export default function Home() {
 
 function DashboardContent({
   persona,
-  negotiationProgress,
-  setNegotiationProgress,
-  timeline,
-  setTimeline,
   barHeights,
   thoughts,
   setThoughts,
@@ -439,24 +410,14 @@ function DashboardContent({
   halimaOnlineState,
   alexOnlineState,
   setLkToken,
-  halimaOffer,
-  setHalimaOffer,
-  alexOffer,
-  setAlexOffer,
-  dealFinalized,
-  setDealFinalized,
   resetNegotiationState,
 }: {
   persona: string;
-  negotiationProgress: number;
-  setNegotiationProgress: React.Dispatch<React.SetStateAction<number>>;
-  timeline: Timeline;
-  setTimeline: React.Dispatch<React.SetStateAction<Timeline>>;
   barHeights: { orange: number[]; blue: number[] };
   thoughts: Thought[];
   setThoughts: React.Dispatch<React.SetStateAction<Thought[]>>;
-  transcripts: Array<{ id: string; agent: string; text: string }>;
-  setTranscripts: React.Dispatch<React.SetStateAction<Array<{ id: string; agent: string; text: string }>>>;
+  transcripts: { id: string; agent: string; text: string }[];
+  setTranscripts: React.Dispatch<React.SetStateAction<{ id: string; agent: string; text: string }[]>>;
   hasMounted: boolean;
   onStartNegotiation: () => void;
   callStatus: string;
@@ -472,13 +433,7 @@ function DashboardContent({
   declineCall: () => void;
   halimaOnlineState: boolean;
   alexOnlineState: boolean;
-  setLkToken: (token: string | null) => void;
-  halimaOffer: any;
-  setHalimaOffer: React.Dispatch<React.SetStateAction<any>>;
-  alexOffer: any;
-  setAlexOffer: React.Dispatch<React.SetStateAction<any>>;
-  dealFinalized: boolean;
-  setDealFinalized: React.Dispatch<React.SetStateAction<boolean>>;
+  setLkToken: (t: string | null) => void;
   resetNegotiationState: () => void;
 }) {
   const room = useRoomContext();
@@ -578,7 +533,6 @@ function DashboardContent({
       const lowerName = name?.toLowerCase() || "";
       if (lowerId.includes("halima") || lowerId.includes("seller") || lowerName.includes("halima")) return "Halima";
       if (lowerId.includes("alex") || lowerId.includes("buyer") || lowerName.includes("alex")) return "Alex";
-      if (lowerId.startsWith("agent-") || lowerId.startsWith("aj_") || lowerId.includes("-worker")) return "Halima"; // Default primary agent fallback
       return "Agent";
     };
 
@@ -618,24 +572,18 @@ function DashboardContent({
           : (participantToAgent.get(participant?.identity || "") || getAgentFromIdentity(participant?.identity, participant?.name));
 
         if (data.type === "thought") {
-          const id = `${agentName}-${crypto.randomUUID()}`;
-          setThoughts((prev: Thought[]) => [
-            { id, agent: agentName || "Agent", text: data.text, type: "insight" },
-            ...prev.slice(0, 9),
-          ]);
-        } else if (data.type === "negotiation_timeline") {
-          setTimeline((prev: Timeline) => {
-            if (prev.turn === data.turn && prev.round === data.round && prev.maxRounds === data.max_rounds) return prev;
-            return { turn: data.turn, round: data.round, maxRounds: data.max_rounds };
+          // Insights: Display agent's tactical thoughts in the right panel
+          console.log("💡 Processing Tactical Thought:", data);
+          const id = `${data.agent}-${crypto.randomUUID()}`;
+          setThoughts((prev: Thought[]) => {
+            if (prev.some(t => t.text === data.text)) return prev;
+            const next = [{ id, agent: data.agent || "Agent", text: data.text, type: "insight" }, ...prev];
+            return next.slice(0, 10);
           });
-          setNegotiationProgress((prev: number) => {
-            const next = (data.round / data.max_rounds) * 100;
-            return next === prev ? prev : next;
-          });
-        } else if (data.type === "SPEECH" || data.type === "HALIMA_DONE" || data.type === "ALEX_SPEECH") {
-          // Drop interim speech DataPackets; we only want final transcripts in the list
+        } else if (data.type === "SPEECH") {
+          // Final Speech Sync: Handle final transcripts published by agents via DataPackets
           if (data.text && data.is_final !== false) {
-            const speaker = data.speaker === "Seller" ? "Halima" : (data.speaker === "Buyer" ? "Alex" : (data.speaker || agentName || "Agent"));
+            const speaker = data.speaker || agentName || "Agent";
             // Normalize for hashing: trim, lowercase, strip trailing periods/punctuation
             const normalizedText = data.text.trim().toLowerCase().replace(/[.!?]+$/, "");
             const contentHash = `${speaker.toLowerCase()}:${normalizedText}`;
@@ -655,18 +603,10 @@ function DashboardContent({
               return next.length > 50 ? next.slice(-50) : next;
             });
           }
-        } else if (data.type === "SPEECH_STATE") {
+        }
+        else if (data.type === "SPEECH_STATE") {
           if (data.agent === "Halima") setHalimaIsSpeaking((prev: boolean) => prev === data.is_speaking ? prev : data.is_speaking);
           if (data.agent === "Alex") setAlexIsSpeaking((prev: boolean) => prev === data.is_speaking ? prev : data.is_speaking);
-        } else if (data.type === "offer_update") {
-          console.warn("💰 OFFER SYNC RECEIVED:", data);
-          if (data.agent === "Halima") setHalimaOffer((prev: any) => JSON.stringify(prev) === JSON.stringify(data.offer) ? prev : data.offer);
-          if (data.agent === "Alex") setAlexOffer((prev: any) => JSON.stringify(prev) === JSON.stringify(data.offer) ? prev : data.offer);
-          setCallStatus(`Offer updated by ${data.agent}`);
-          setTimeout(() => setCallStatus(""), 3000);
-        } else if (data.type === "DEAL_FINALIZED") {
-          setDealFinalized(true);
-          setCallStatus(`🤝 DEAL FINALIZED BY ${data.agent.toUpperCase()}!`);
         }
       } catch (e) {
         console.error("❌ [SIGNAL] Data Error:", e);
@@ -712,11 +652,7 @@ function DashboardContent({
       room.off(RoomEvent.DataReceived, onDataReceived);
       room.off(RoomEvent.TranscriptionReceived, handleTranscription);
     };
-  }, [room, setThoughts, setTranscripts, setTimeline, setNegotiationProgress, participantToAgent, persona, setLkToken, lastRoomName]);
-
-  useEffect(() => {
-    console.warn("🔁 TIMELINE STATE CHANGED:", timeline);
-  }, [timeline]);
+  }, [room, setThoughts, setTranscripts, participantToAgent, persona, setLkToken, lastRoomName]);
 
   const halimaTrack = agentTracks.find(t => participantToAgent.get(t.participant.identity) === "Halima");
   const alexTrack = agentTracks.find(t => participantToAgent.get(t.participant.identity) === "Alex");
@@ -949,14 +885,12 @@ function DashboardContent({
                   }}
                 />
               ))}
-              <div className="mx-4 flex flex-col items-center">
-                <div className="w-24 h-[2px] bg-white/5 rounded-full relative mb-1">
-                  <div
-                    className="absolute top-0 left-0 h-full bg-orange-500 transition-all duration-500 ease-out"
-                    style={{ width: `${negotiationProgress}%` }}
-                  />
+              <div className="mx-8 flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full border-2 border-orange-500/20 flex items-center justify-center animate-pulse">
+                  <div className="w-12 h-12 rounded-full border border-orange-500/30 flex items-center justify-center">
+                    <div className="w-2 h-2 bg-orange-500 rounded-full" />
+                  </div>
                 </div>
-                <p className="text-[8px] font-mono text-orange-500/50 uppercase tracking-widest">Efficiency: {Math.round(negotiationProgress)}%</p>
               </div>
               {hasMounted && barHeights.blue.map((height: number, i: number) => (
                 <div
@@ -972,100 +906,39 @@ function DashboardContent({
             </div>
           </div>
 
-          {/* Bidding - Bottom Half */}
-          <div className="h-3/5 rounded-3xl bg-white/5 border border-white/10 p-8 relative overflow-hidden group">
-            {/* Ambient Background Gradient for Bidding */}
-            <div className="absolute -top-24 -right-24 w-64 h-64 bg-orange-500/10 rounded-full blur-[100px] group-hover:bg-orange-500/20 transition-all duration-700" />
-            <div className="absolute -bottom-24 -left-24 w-64 h-64 bg-blue-500/10 rounded-full blur-[100px] group-hover:bg-blue-500/20 transition-all duration-700" />
-
-            {/* Header */}
-            <div className="flex justify-between items-center mb-10 relative z-10">
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-orange-500/20 to-red-500/20 flex items-center justify-center border border-white/10 group-hover:scale-110 transition-transform duration-500">
-                  <span className="text-2xl animate-pulse">🤝</span>
-                </div>
-                <div>
-                  <h3 className="text-xl font-black italic tracking-tighter uppercase italic">Live Bidding Matrix</h3>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-orange-500 animate-ping" />
-                    <span className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Real-time sync</span>
-                  </div>
-                </div>
+          {/* Strategic Thoughts - Bottom Half */}
+          <div className="h-3/5 rounded-3xl bg-white/5 border border-white/10 p-8 relative overflow-hidden group flex flex-col">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-orange-500/20 to-red-500/20 flex items-center justify-center border border-white/10">
+                <span className="text-2xl animate-pulse">💡</span>
               </div>
+              <div>
+                <h3 className="text-xl font-black italic tracking-tighter uppercase">Negotiation Insights</h3>
+                <span className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Real-time Agent Intelligence</span>
+              </div>
+            </div>
 
-              {dealFinalized && (
-                <div className="px-6 py-2 bg-green-500 rounded-full text-black text-[10px] font-black uppercase tracking-[0.2em] shadow-[0_0_20px_rgba(34,197,94,0.4)] animate-bounce">
-                  Deal Closed
+            <div className="flex-1 space-y-4 overflow-y-auto pr-2 custom-scrollbar">
+              {thoughts.length > 0 ? (
+                thoughts.map((thought) => (
+                  <div key={thought.id} className="p-4 rounded-2xl bg-white/5 border border-white/5 animate-fade-in-up">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className={`text-[8px] font-black uppercase tracking-widest ${thought.agent === "Halima" ? "text-orange-500" : "text-blue-500"}`}>{thought.agent}</span>
+                      <div className="h-px flex-1 bg-white/5" />
+                    </div>
+                    <p className="text-xs text-gray-400 leading-relaxed italic">"{thought.text}"</p>
+                  </div>
+                ))
+              ) : (
+                <div className="h-full flex flex-col items-center justify-center opacity-20">
+                  <div className="w-12 h-12 rounded-full border-2 border-dashed border-white/20 mb-4 animate-spin-slow" />
+                  <p className="text-[10px] uppercase tracking-widest font-bold">Awaiting Strategic Input</p>
                 </div>
               )}
             </div>
 
-            {/* Offer Comparison Room */}
-            <div className="grid grid-cols-2 gap-6 relative z-10">
-              {/* Halima Offer */}
-              <div className={`p-6 rounded-3xl border transition-all duration-500 ${halimaOffer ? "bg-orange-500/10 border-orange-500/30 shadow-[0_0_30px_rgba(249,115,22,0.1)]" : "bg-white/5 border-white/5 opacity-40 grayscale"}`}>
-                <div className="flex items-center gap-2 mb-4">
-                  <div className="w-2 h-2 rounded-full bg-orange-500" />
-                  <span className="text-[10px] font-black uppercase tracking-widest text-orange-500">Halima's Terms</span>
-                </div>
-                {halimaOffer ? (
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-end">
-                      <span className="text-[10px] text-gray-500 uppercase">Per KG</span>
-                      <span className="text-3xl font-black tracking-tighter text-white animate-fade-in-up">${halimaOffer.price}</span>
-                    </div>
-                    <div className="space-y-3 pt-4 border-t border-white/5">
-                      <div className="flex justify-between text-[10px] uppercase font-bold tracking-wider">
-                        <span className="text-gray-500 italic">Delivery</span>
-                        <span className={halimaOffer.delivery_included ? "text-green-400" : "text-red-400"}>{halimaOffer.delivery_included ? "Included" : "Excluded"}</span>
-                      </div>
-                      <div className="flex justify-between text-[10px] uppercase font-bold tracking-wider">
-                        <span className="text-gray-500 italic">Payment</span>
-                        <span className="text-blue-400">{halimaOffer.payment_terms.replace("_", " ")}</span>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="h-24 flex items-center justify-center border-2 border-dashed border-white/10 rounded-2xl">
-                    <span className="text-[10px] uppercase tracking-widest font-bold text-gray-600 animate-pulse">Awaiting Offer</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Alex Offer */}
-              <div className={`p-6 rounded-3xl border transition-all duration-500 ${alexOffer ? "bg-blue-500/10 border-blue-500/30 shadow-[0_0_30px_rgba(59,130,246,0.1)]" : "bg-white/5 border-white/5 opacity-40 grayscale"}`}>
-                <div className="flex items-center gap-2 mb-4">
-                  <div className="w-2 h-2 rounded-full bg-blue-500" />
-                  <span className="text-[10px] font-black uppercase tracking-widest text-blue-500">Alex's Terms</span>
-                </div>
-                {alexOffer ? (
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-end">
-                      <span className="text-[10px] text-gray-500 uppercase">Per KG</span>
-                      <span className="text-3xl font-black tracking-tighter text-white animate-fade-in-up">${alexOffer.price}</span>
-                    </div>
-                    <div className="space-y-3 pt-4 border-t border-white/5">
-                      <div className="flex justify-between text-[10px] uppercase font-bold tracking-wider">
-                        <span className="text-gray-500 italic">Delivery</span>
-                        <span className={alexOffer.delivery_included ? "text-green-400" : "text-red-400"}>{alexOffer.delivery_included ? "Included" : "Excluded"}</span>
-                      </div>
-                      <div className="flex justify-between text-[10px] uppercase font-bold tracking-wider">
-                        <span className="text-gray-500 italic">Payment</span>
-                        <span className="text-blue-400">{alexOffer.payment_terms.replace("_", " ")}</span>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="h-24 flex items-center justify-center border-2 border-dashed border-white/10 rounded-2xl">
-                    <span className="text-[10px] uppercase tracking-widest font-bold text-gray-600 animate-pulse">Awaiting Offer</span>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Bottom Status Branding */}
-            <div className="mt-8 flex justify-center opacity-30 group-hover:opacity-100 transition-opacity duration-700">
-              <span className="text-[8px] uppercase tracking-[0.5em] font-black text-gray-400 italic">Harvest Protocol v3.2 // Secure Negotiation Environment</span>
+            <div className="mt-6 pt-6 border-t border-white/5 flex justify-center">
+              <span className="text-[8px] uppercase tracking-[0.5em] font-black text-gray-600 italic">Harvest Protocol v4.0 // Pure Intelligence Mode</span>
             </div>
           </div>
         </div>
