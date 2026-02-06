@@ -7,6 +7,7 @@ from livekit.agents import (
     JobProcess,
     cli,
     room_io,
+    StopResponse,
 )
 from livekit.agents.voice import (
     AgentStateChangedEvent,
@@ -21,6 +22,7 @@ import asyncio
 import os
 import random
 from pathlib import Path
+import re
 
 # -------------------------------------------------
 # Env
@@ -51,6 +53,14 @@ class NegotiationAgent(Agent):
         self.ctx = ctx
         self.is_awaiting_approval = False
         self.pending_contract_data = {}
+        self.last_chat_ctx = None # Capture context for background tasks
+
+    async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
+        """Idiomatic way to silence the agent during the drafting phase."""
+        self.last_chat_ctx = turn_ctx # Robust history capture
+        if self.is_awaiting_approval:
+            print(f"DEBUG: 🤫 [SILENCE] {self.persona} is awaiting contract approval. Aborting response.")
+            raise StopResponse()
 
 # -------------------------------------------------
 # Server Setup
@@ -88,10 +98,11 @@ async def entrypoint(ctx: JobContext):
         instructions = f"""You are Halima, a Kenyan farmer selling bulk maize. 
 CRITICAL: This is a realtime voice conversation. Keep responses very brief (1-2 sentences).
 NEGOTIATION RULES:
-- Target: $1.25/kg, Minimum: $1.15/kg.
-- Negotiate delivery (included or extra) and payment terms (cash on delivery or 7 days).
-- Once terms are settled, say "I'll get the paperwork ready" or "I'll send the contract".
-- You are speaking with Alex.
+1. MANDATORY: You MUST confirm the specific quantity (in kg or tons) before agreeing to anything.
+2. If the buyer doesn't mention quantity, ask: "How many kilograms are you looking for?"
+3. Do not mention paperwork or contracts until Price, Quantity, and Delivery are all confirmed.
+4. Once settled, say "I'll get the paperwork ready" or "I'll send the contract".
+5. You are speaking with Alex.
 """
     else:
         voice_name = "en-US-GuyNeural" # Azure Voice
@@ -120,13 +131,147 @@ NEGOTIATION RULES:
     # Initialize the agent explicitly so we can refer to it in listeners
     negotiation_agent = NegotiationAgent(instructions, persona, ctx)
 
+    # Identifiable prefix for all logs to catch job stealing
+    worker_id = f"[{persona.upper()}-{os.getpid()}]"
+    print(f"DEBUG: 🛠️  {worker_id} Starting agent session for {persona}")
+
     async def broadcast_data(data: dict, reliable: bool = True):
         """Helper to broadcast data to all participants in the room"""
         try:
             payload = json.dumps(data).encode('utf-8')
             await ctx.room.local_participant.publish_data(payload, reliable=reliable)
         except Exception as e:
-             logger.error(f"Error broadcasting {data.get('type')}: {e}")
+             logger.error(f"{worker_id} Error broadcasting {data.get('type')}: {e}")
+
+    from types import SimpleNamespace
+
+    def normalize_chat_ctx(ctx):
+        """
+        Normalize different chat context shapes to a list of messages with .role and .content.
+        Returns list of SimpleNamespace(role=<>, content=<>)
+        """
+        if ctx is None:
+            return []
+        
+        # 1. object already supports as_messages()
+        if hasattr(ctx, "as_messages") and callable(getattr(ctx, "as_messages")):
+            return ctx.as_messages()
+
+        # 2. ctx has .messages or .history attribute
+        if hasattr(ctx, "messages"):
+            raw = ctx.messages
+        elif hasattr(ctx, "history"):
+            raw = ctx.history
+        else:
+            raw = ctx
+
+        # 3. Single string -> one message
+        if isinstance(raw, str):
+            return [SimpleNamespace(role="system", content=raw)]
+
+        # 4. Normalize list/iterable
+        msgs = []
+        if isinstance(raw, (list, tuple)):
+            for m in raw:
+                if m is None: continue
+                if hasattr(m, "role") and hasattr(m, "content"):
+                    msgs.append(SimpleNamespace(role=m.role, content=m.content))
+                elif isinstance(m, dict):
+                    msgs.append(SimpleNamespace(role=m.get("role", "unknown"), content=m.get("content", "")))
+                else:
+                    msgs.append(SimpleNamespace(role="unknown", content=str(m)))
+        return msgs
+
+    async def consume_llm_stream(stream):
+        """Aggregate chunks from an LLM stream into a single string"""
+        text = ""
+        async for chunk in stream:
+            delta = getattr(chunk, "delta", None)
+            if delta is None: continue
+            content = getattr(delta, "content", None)
+            if content is None: continue
+            # Handle both list[str] and raw string formats
+            text += "".join(content) if isinstance(content, (list, tuple)) else str(content)
+        return text
+
+    # TRIGGER LLM TERM EXTRACTOR (Phase 8 Reliability)
+    async def extract_and_preview():
+        print(f"DEBUG: 🚀 {worker_id} [TASK START] extract_and_preview")
+        # 1. IMMEDIATE Feedback - Signal "Drafting" status BEFORE LLM call
+        logger.warning(f"{worker_id} 📤 Broadcasting CONTRACT_INTENT (Instant Feedback)")
+        await broadcast_data({
+            "type": "CONTRACT_INTENT",
+            "agent": persona,
+            "status": "drafting"
+        })
+
+        try:
+            # Safer history extraction (Using normalizer)
+            ctx_to_use = negotiation_agent.last_chat_ctx or session.chat_ctx
+            try:
+                history_messages = normalize_chat_ctx(ctx_to_use)
+            except Exception as e:
+                logger.error(f"{worker_id} Error normalizing chat context: {e}")
+                history_messages = []
+
+            # If history is empty, provide a hint to the LLM
+            if not history_messages:
+                history_text = "No prior messages available. Negotiation just started."
+            else:
+                history_text = "\n".join([f"{m.role}: {m.content}" for m in history_messages])
+            
+            print(f"DEBUG: 📝 {worker_id} History Context Size: {len(history_messages)} items")
+
+            # Construct messages for extraction (Defensive list-wrapping for Pydantic)
+            messages = [
+                {"role": "system", "content": "You are a specialized Term Extractor for Kenyan maize deals. Analyze the history and extract: buyer (string), product (string), price (string e.g. '$1.15/kg'), quantity (string e.g. '5 tons'), delivery (string), payment (string). Output ONLY JSON."},
+                {"role": "user", "content": f"History:\n{history_text}\nExtract terms from the above."}
+            ]
+            
+            # Use a fast model to avoid rate limits and minimize latency
+            llm_client = groq.LLM(model="llama-3.1-8b-instant")
+            
+            # Form final messages with list-wrapped content for schema compliance
+            llm_messages = [llm.ChatMessage(role=m["role"], content=[m["content"]]) for m in messages]
+            
+            # Start the stream - Groq returns an LLMStream, NOT a direct response
+            stream = llm_client.chat(chat_ctx=llm.ChatContext(items=llm_messages))
+            content = await consume_llm_stream(stream)
+            
+            # Simple JSON extraction from model output
+            try:
+                match = re.search(r"\{.*\}", content, re.DOTALL)
+                extracted_data = json.loads(match.group()) if match else {}
+            except:
+                logger.warning("LLM Term Extraction failed to parse JSON, using contextual defaults.")
+                extracted_data = {}
+
+            # Populate missing fields with defaults
+            defaults = {
+                "buyer": "Alex", "product": "Maize", "price": "Negotiated",
+                "quantity": "Negotiated", "delivery": "Discussed", "payment": "Discussed"
+            }
+            # 5. Broadcast final result
+            print(f"DEBUG: 📋 {worker_id} Extracted Data: {extracted_data}")
+            negotiation_agent.pending_contract_data = {**defaults, **extracted_data}
+            
+            await broadcast_data({
+                "type": "CONTRACT_PREVIEW",
+                "contract_id": f"ctr_{ctx.room.name}_{random.getrandbits(16)}_{persona}",
+                "agent": persona,
+                "contract_data": negotiation_agent.pending_contract_data,
+                "title": "Maize Supply Agreement (Draft)"
+            })
+
+        except Exception as e:
+            logger.error(f"{worker_id} Critical Error in Term Extraction: {e}")
+            await broadcast_data({
+                "type": "CONTRACT_PREVIEW_ERROR",
+                "agent": persona,
+                "error": str(e)
+            })
+            # Reset silence so they can at least keep talking
+            negotiation_agent.is_awaiting_approval = False
 
     # BROADCASTERS for cross-browser sync
     @session.on("agent_state_changed")
@@ -165,56 +310,52 @@ NEGOTIATION RULES:
     # Removed redundant on_user_transcript broadcast to prevent multi-agent 'he-said/she-said' duplication.
     # We rely on each speaker (agent or human) to broadcast/publish their own transcripts.
 
+    # Note: on_user_turn_completed is handled by the NegotiationAgent class method at line 58.
+    # No redundant session listener required here.
+
     @session.on("conversation_item_added")
     def on_conversation_item(event: ConversationItemAddedEvent):
-        # Broadcast the agent's OWN final transcripts
-        if event.item.type == "message" and event.item.role == "assistant":
-            text = event.item.text_content
-            if text and text.strip():
-                # Speech Sync: Ensure the transcript appears exactly once in the list
+        role = event.item.role
+        text = (event.item.text_content or "").strip()
+        print(f"DEBUG: 📥 {worker_id} [ITEM ADDED] {role}: {text[:50]}...")
+
+        # 1. BRAODCAST ASSISTANT SPEECH
+        if role == "assistant":
+            if text:
                 asyncio.create_task(broadcast_data({
                     "type": "SPEECH",
                     "text": text,
-                    "speaker": persona, # Always "Halima" or "Alex"
+                    "speaker": persona,
                     "is_final": True
                 }))
 
-                # CONTRACT INTENT DETECTION (Based on contract-n-history.md)
-                intent_keywords = ["send the contract", "send you the contract", "draft the agreement", "final contract", "paperwork ready", "paperwork for shipment"]
-                if any(kw in text.lower() for kw in intent_keywords) and persona == "Halima":
-                    logger.info(f"📝 {persona} Intent Detected: Drafting contract...")
-                    negotiation_agent.is_awaiting_approval = True
-                    
-                    # EXTRACT TERMS (Simulated structured extraction - in a real app this would be an LLM call)
-                    # For now, we use the context of the agent's final agreement sentence
-                    negotiation_agent.pending_contract_data = {
-                        "buyer": "Alex",
-                        "product": "Maize",
-                        "price": "$1.18/kg", # Defaulting to last mentioned stable price
-                        "quantity": "5000kg",
-                        "delivery": "Free in Nairobi",
-                        "payment": "Cash on delivery"
-                    }
-                    
-                    # 1. Signal "Drafting" status
-                    asyncio.create_task(broadcast_data({
-                        "type": "CONTRACT_INTENT",
-                        "agent": persona,
-                        "status": "drafting"
-                    }))
+                # 2. HALIMA INTENT DETECTION (Closing the deal)
+                if persona == "Halima":
+                    # Even broader regex to catch 'set', 'deal', 'finalize', etc.
+                    intent_pattern = r"(paperwork|contract|agreement|paperwork ready|send.*contract|formalize.*agreement|finalize.*deal|sign.*paperwork|ready.*paperwork|get.*paperwork|finalize.*details|we're set|sounds like a deal)"
+                    match = re.search(intent_pattern, text.lower())
+                    if match:
+                        print(f"DEBUG: ✨ [INTENT MATCH] Found '{match.group(0)}' in Halima speech")
+                        if not negotiation_agent.is_awaiting_approval:
+                            print(f"DEBUG: ✅ [TRIGGER] Calling extract_and_preview for {persona}")
+                            negotiation_agent.is_awaiting_approval = True
+                            session.interrupt()
+                            asyncio.create_task(extract_and_preview())
+                        else:
+                            print(f"DEBUG: ⏭️ [SKIP] Already awaiting approval (state: {negotiation_agent.is_awaiting_approval})")
+                    else:
+                        print(f"DEBUG: 🚫 [NO MATCH] Speech did not contain closing intent.")
 
-                    # 2. Emit CONTRACT_PREVIEW after a short simulate "drafting" delay
-                    async def emit_preview():
-                        await asyncio.sleep(2)
-                        await broadcast_data({
-                            "type": "CONTRACT_PREVIEW",
-                            "contract_id": f"ctr_{ctx.room.name}_{persona}",
-                            "agent": persona,
-                            "contract_data": negotiation_agent.pending_contract_data,
-                            "title": "Maize Supply Agreement"
-                        })
-                    
-                    asyncio.create_task(emit_preview())
+        # 3. USER INTENT FALLBACK (If Alex says "send paperwork")
+        elif role == "user" and persona == "Halima":
+            if text:
+                if re.search(r"(send.*contract|finalize.*deal|sign.*paperwork|ready.*paperwork|get.*paperwork|finalize.*details|we're set|sounds like a deal)", text.lower()):
+                    print(f"DEBUG: 💡 [USER INTENT] Detected deal closure from user: '{text[:30]}'")
+                    if not negotiation_agent.is_awaiting_approval:
+                        print(f"DEBUG: ✅ [TRIGGER] Calling extract_and_preview (USER FALLBACK)")
+                        negotiation_agent.is_awaiting_approval = True
+                        session.interrupt()
+                        asyncio.create_task(extract_and_preview())
 
     # Data Packet Listener for State Sync (Agent's internal history sync)
     @ctx.room.on("data_received")
@@ -227,53 +368,79 @@ NEGOTIATION RULES:
             
             # Handle SYNC_REQUEST from newly joined browsers
             if data.get("type") == "SYNC_REQUEST":
-                logger.info(f"📥 {persona} received SYNC_REQUEST from dashboard")
+                print(f"DEBUG: 📥 {worker_id} received SYNC_REQUEST")
                 return
 
-            # CONTRACT APPROVAL FLOW (Human-in-the-loop)
-            if data.get("type") == "CONTRACT_APPROVED" and persona == "Halima":
-                logger.info(f"✅ {persona} Contract Approved by User.")
+            print(f"DEBUG: 📥 {worker_id} Packet Recvd: {data.get('type')}")
+            
+            # SILENT APPROVAL SYNC: Pause speech if drafting/previewing
+            if data.get("type") in ["CONTRACT_INTENT", "CONTRACT_PREVIEW"]:
+                print(f"DEBUG: 🤫 {worker_id} silencing for contract flow. (Awaiting Approval: TRUE)")
+                session.interrupt()
+                negotiation_agent.is_awaiting_approval = True
+                return
+
+            if data.get("type") == "CONTRACT_APPROVED":
+                print(f"DEBUG: ✅ {persona} Contract Approved signal received. (Awaiting Approval: FALSE)")
                 negotiation_agent.is_awaiting_approval = False
                 
-                # Finalize and Share
-                asyncio.create_task(broadcast_data({
-                    "type": "FILE_SHARED",
-                    "from": persona,
-                    "filename": "maize_supply_contract_final.pdf",
-                    "url": "#", # Simulated URL
-                    "contract_data": negotiation_agent.pending_contract_data
-                }))
-                
-                # Acknowledge verbally
-                asyncio.create_task(session.generate_reply(
-                    instructions="The user has approved the contract. Tell the buyer you have sent the final document and thank them.",
-                    allow_interruptions=False
-                ))
+                # SENDER SIDE (Halima) - Finalize and Share
+                if persona == "Halima":
+                    asyncio.create_task(broadcast_data({
+                        "type": "FILE_SHARED",
+                        "from": persona,
+                        "filename": "maize_supply_contract_final.pdf",
+                        "url": "#", # Simulated URL
+                        "contract_data": negotiation_agent.pending_contract_data
+                    }))
+                    
+                    # Acknowledge verbally
+                    asyncio.create_task(session.generate_reply(
+                        instructions="The user has approved the contract. Tell the buyer you have sent the final document and thank them.",
+                        allow_interruptions=False
+                    ))
 
-            elif data.get("type") == "CONTRACT_REJECTED" and persona == "Halima":
-                logger.info(f"❌ {persona} Contract Rejected. Feedback: {data.get('reason')}")
+            elif data.get("type") == "CONTRACT_REJECTED":
+                print(f"DEBUG: ❌ {persona} Contract Rejected. Resetting state...")
                 negotiation_agent.is_awaiting_approval = False
                 
-                # Acknowledge rejection verbally and resume negotiation
-                asyncio.create_task(session.generate_reply(
-                    instructions=f"The user rejected the contract draft with this feedback: '{data.get('reason')}'. Acknowledge this and ask how to proceed.",
-                    allow_interruptions=False
-                ))
+                # SENDER SIDE (Halima) - Acknowledge feedback
+                if persona == "Halima":
+                    asyncio.create_task(session.generate_reply(
+                        instructions=f"The user rejected the contract draft with this feedback: '{data.get('reason')}'. Acknowledge this and ask how to proceed.",
+                        allow_interruptions=False
+                    ))
 
-            # RECIPIENT SIDE RESPONSE
-            elif data.get("type") == "FILE_SHARED" and persona == "Alex":
-                logger.info(f"📥 {persona} received final contract. Reacting...")
-                asyncio.create_task(session.generate_reply(
-                    instructions="You just received the final contract from Halima. Tell her you see it and it looks perfect.",
-                    allow_interruptions=False
-                ))
+            # SHARED RESPONSE (Both reset on file receipt)
+            elif data.get("type") == "FILE_SHARED":
+                print(f"DEBUG: 📥 {persona} sees file shared. (Awaiting Approval: FALSE)")
+                negotiation_agent.is_awaiting_approval = False
+                
+                if persona == "Alex":
+                    asyncio.create_task(session.generate_reply(
+                        instructions="You just received the final contract from Halima. Tell her you see it and it looks perfect.",
+                        allow_interruptions=False
+                    ))
         except Exception as e:
             logger.error(f"Error in data listener: {e}")
 
-    # Silence 'ignoring text stream' logs
     @ctx.room.on("transcription_received")
-    def on_transcription_received(transcription):
-        pass
+    def on_transcription_received(transcription: rtc.Transcription, participant: rtc.RemoteParticipant = None, publication: rtc.TrackPublication = None):
+        """Robust handler for transcriptions (Handles both object and raw list shapes)"""
+        try:
+            # Prefer first segment text, support list or object shapes
+            if isinstance(transcription, list):
+                first = transcription[0] if transcription else None
+            else:
+                first = (transcription.segments[0] if getattr(transcription, "segments", None) else None)
+            
+            # Extract text safely from dict or object
+            msg = getattr(first, "text", None) or (first.get("text") if isinstance(first, dict) else (str(first) if first is not None else ""))
+            
+            if participant and msg:
+                print(f"DEBUG: 📝 {worker_id} Transcript Recvd from {participant.identity or 'unknown'}: {msg[:30]}...")
+        except Exception:
+            pass
 
     # Start session
     logger.info(f"🎙️ Starting {persona} agent session (Identity: {ctx.room.local_participant.identity})")
