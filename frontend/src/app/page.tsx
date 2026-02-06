@@ -7,9 +7,37 @@ import {
   useTracks,
   useRoomContext,
 } from "@livekit/components-react";
-import { Participant, Track } from "livekit-client";
+import { Participant, Track, RoomEvent, TranscriptionSegment, TrackPublication, RemoteParticipant } from "livekit-client";
 import Transcript from "@/components/Transcript";
-import { RoomEvent, TranscriptionSegment, TrackPublication, RemoteParticipant } from "livekit-client";
+interface Contract {
+  id: string;
+  title: string;
+  agent: string;
+  status: "drafting" | "pending_approval" | "sent" | "rejected";
+  contract_data: {
+    buyer: string;
+    product: string;
+    price: string;
+    quantity: string;
+    delivery: string;
+    payment: string;
+  };
+}
+
+interface SharedFile {
+  name: string;
+  url: string;
+  from: string;
+  timestamp: string;
+  contract_data: {
+    buyer: string;
+    product: string;
+    price: string;
+    quantity: string;
+    delivery: string;
+    payment: string;
+  };
+}
 
 interface Thought {
   id: string;
@@ -55,6 +83,10 @@ export default function Home() {
   const [callState, setCallState] = useState<"idle" | "calling" | "ringing" | "connected">("idle");
   const [incomingCallFrom, setIncomingCallFrom] = useState<string | null>(null);
   const [outgoingCallTo, setOutgoingCallTo] = useState<string | null>(null);
+  // Contract states
+  const [contractStatus, setContractStatus] = useState<"none" | "drafting" | "pending_approval" | "sent" | "received">("none");
+  const [pendingContract, setPendingContract] = useState<Contract | null>(null);
+  const [sharedFiles, setSharedFiles] = useState<SharedFile[]>([]);
 
 
 
@@ -379,6 +411,12 @@ export default function Home() {
             alexOnlineState={alexOnlineState}
             setLkToken={setLkToken}
             resetNegotiationState={resetNegotiationState}
+            contractStatus={contractStatus}
+            setContractStatus={setContractStatus}
+            pendingContract={pendingContract}
+            setPendingContract={setPendingContract}
+            sharedFiles={sharedFiles}
+            setSharedFiles={setSharedFiles}
           />
           <RoomAudioRenderer />
         </LiveKitRoom>
@@ -411,6 +449,12 @@ function DashboardContent({
   alexOnlineState,
   setLkToken,
   resetNegotiationState,
+  contractStatus,
+  setContractStatus,
+  pendingContract,
+  setPendingContract,
+  sharedFiles,
+  setSharedFiles,
 }: {
   persona: string;
   barHeights: { orange: number[]; blue: number[] };
@@ -435,6 +479,12 @@ function DashboardContent({
   alexOnlineState: boolean;
   setLkToken: (t: string | null) => void;
   resetNegotiationState: () => void;
+  contractStatus: "none" | "drafting" | "pending_approval" | "sent" | "received";
+  setContractStatus: React.Dispatch<React.SetStateAction<"none" | "drafting" | "pending_approval" | "sent" | "received">>;
+  pendingContract: Contract | null;
+  setPendingContract: React.Dispatch<React.SetStateAction<Contract | null>>;
+  sharedFiles: SharedFile[];
+  setSharedFiles: React.Dispatch<React.SetStateAction<SharedFile[]>>;
 }) {
   const room = useRoomContext();
 
@@ -489,9 +539,7 @@ function DashboardContent({
       }
     });
 
-    if (mapping.size > 0) {
-      console.log("🗺️ Robust Agent Mapping:", Object.fromEntries(mapping));
-    }
+
     return mapping;
   }, [agentTracks]);
 
@@ -564,6 +612,42 @@ function DashboardContent({
           setOutgoingCallTo(null);
           setTimeout(() => setCallStatus(""), 3000);
           return;
+        } else if (data.type === "CONTRACT_INTENT") {
+          console.log("📝 Received CONTRACT_INTENT:", data);
+          if (data.agent === "Halima") setContractStatus("drafting");
+          return;
+        } else if (data.type === "CONTRACT_PREVIEW") {
+          console.log("📝 Received CONTRACT_PREVIEW:", data);
+          setPendingContract({
+            id: data.contract_id,
+            title: data.title,
+            agent: data.agent,
+            status: "pending_approval",
+            contract_data: data.contract_data
+          });
+          setContractStatus("pending_approval");
+          return;
+        } else if (data.type === "CONTRACT_APPROVED") {
+          console.log("✅ Received CONTRACT_APPROVED:", data);
+          setContractStatus("sent");
+          setPendingContract(null);
+          return;
+        } else if (data.type === "CONTRACT_REJECTED") {
+          console.log("❌ Received CONTRACT_REJECTED:", data);
+          setContractStatus("none");
+          setPendingContract(null);
+          return;
+        } else if (data.type === "FILE_SHARED") {
+          console.log("📥 Received FILE_SHARED:", data);
+          setSharedFiles(prev => [...prev, {
+            name: data.filename,
+            url: data.url,
+            from: data.from,
+            timestamp: new Date().toLocaleTimeString(),
+            contract_data: data.contract_data
+          }]);
+          setContractStatus("received");
+          return;
         }
 
         // --- NEGOTIATION SYNC LOGIC ---
@@ -617,6 +701,12 @@ function DashboardContent({
     const handleTranscription = (segments: TranscriptionSegment[], participant?: Participant) => {
       if (!participant) return;
       const agentName = participantToAgent.get(participant.identity) || getAgentFromIdentity(participant.identity, participant.name);
+
+      // CRITICAL: Ignore transcripts for known agents from audio tracks.
+      // We rely EXCLUSIVELY on the "SPEECH" data packet for Halima/Alex transcripts
+      // to avoid 3x duplication and fragmentation.
+      if (agentName === "Halima" || agentName === "Alex") return;
+
       const finalSegments = segments.filter(s => s.final && s.text.trim());
       if (finalSegments.length === 0) return;
 
@@ -673,6 +763,26 @@ function DashboardContent({
   const alexStatus = alexTrack
     ? (alexSpeaking ? "SPEAKING" : "ACTIVE")
     : (callState === "connected" ? "CONNECTED" : (alexOnlineState ? "READY" : "OFFLINE"));
+
+  const approveContract = () => {
+    if (!room || !pendingContract) return;
+    room.localParticipant.publishData(
+      new TextEncoder().encode(JSON.stringify({ type: "CONTRACT_APPROVED", contract_id: pendingContract.id })),
+      { reliable: true }
+    );
+    setContractStatus("sent");
+    setPendingContract(null);
+  };
+
+  const rejectContract = (reason: string) => {
+    if (!room || !pendingContract) return;
+    room.localParticipant.publishData(
+      new TextEncoder().encode(JSON.stringify({ type: "CONTRACT_REJECTED", contract_id: pendingContract.id, reason })),
+      { reliable: true }
+    );
+    setContractStatus("none");
+    setPendingContract(null);
+  };
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -797,6 +907,61 @@ function DashboardContent({
         </div>
       )}
 
+      {/* Contract Approval Modal (For Halima / Sender) */}
+      {contractStatus === "pending_approval" && pendingContract && persona === "Halima" && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-xl flex items-center justify-center z-[60] animate-fade-in">
+          <div className="w-full max-w-2xl bg-[#0a0a0a] border-2 border-orange-500/20 rounded-3xl p-8 shadow-2xl relative overflow-hidden group">
+            <div className="absolute inset-0 bg-gradient-to-br from-orange-500/5 via-transparent to-transparent opacity-50" />
+
+            {/* Header */}
+            <div className="relative mb-8 flex items-center gap-4">
+              <div className="w-12 h-12 bg-orange-500/20 rounded-xl flex items-center justify-center">
+                <svg className="w-6 h-6 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-2xl font-black text-white">{pendingContract.title}</h3>
+                <p className="text-orange-400/60 text-xs font-bold uppercase tracking-widest">Drafted by {pendingContract.agent}</p>
+              </div>
+            </div>
+
+            {/* Content - Structured Grid */}
+            <div className="bg-white/5 rounded-2xl p-6 mb-8 border border-white/10 grid grid-cols-2 gap-y-4 gap-x-8">
+              {[
+                { label: "Buyer", value: pendingContract.contract_data.buyer },
+                { label: "Product", value: pendingContract.contract_data.product },
+                { label: "Price", value: pendingContract.contract_data.price },
+                { label: "Quantity", value: pendingContract.contract_data.quantity },
+                { label: "Delivery", value: pendingContract.contract_data.delivery, full: true },
+                { label: "Payment", value: pendingContract.contract_data.payment, full: true },
+              ].map((field, idx) => (
+                <div key={idx} className={field.full ? "col-span-2" : "col-span-1"}>
+                  <p className="text-orange-500/40 text-[8px] font-black uppercase tracking-widest mb-1">{field.label}</p>
+                  <p className="text-white font-bold">{field.value}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Actions */}
+            <div className="grid grid-cols-2 gap-4">
+              <button
+                onClick={() => rejectContract("Terms need adjustment.")}
+                className="py-4 bg-red-500/10 hover:bg-red-500/20 border border-red-500/30 rounded-xl text-red-500 font-black uppercase tracking-wider transition-all"
+              >
+                Request Changes
+              </button>
+              <button
+                onClick={approveContract}
+                className="py-4 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-400 hover:to-orange-500 rounded-xl text-white font-black uppercase tracking-wider shadow-lg shadow-orange-500/20 transition-all hover:scale-[1.02]"
+              >
+                Approve & Send
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex justify-between items-center mb-12 border-b border-white/5 pb-8">
         {/* Persona Header */}
         <div>
@@ -915,11 +1080,50 @@ function DashboardContent({
               </div>
               <div>
                 <h3 className="text-xl font-black italic tracking-tighter uppercase">Negotiation Insights</h3>
-                <span className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Real-time Agent Intelligence</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-gray-500 uppercase tracking-widest font-bold">Real-time Agent Intelligence</span>
+                  {contractStatus === "drafting" && (
+                    <span className="flex items-center gap-1.5 px-2 py-0.5 bg-orange-500/10 border border-orange-500/20 rounded-full text-[8px] font-black text-orange-500 animate-pulse">
+                      <span className="w-1 h-1 bg-orange-500 rounded-full animate-ping" />
+                      DRAFTING CONTRACT
+                    </span>
+                  )}
+                  {contractStatus === "sent" && (
+                    <span className="px-2 py-0.5 bg-green-500/10 border border-green-500/20 rounded-full text-[8px] font-black text-green-500">
+                      CONTRACT SENT ✅
+                    </span>
+                  )}
+                  {contractStatus === "received" && (
+                    <span className="px-2 py-0.5 bg-blue-500/10 border border-blue-500/20 rounded-full text-[8px] font-black text-blue-500 animate-bounce">
+                      NEW CONTRACT RECEIVED 📩
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
 
             <div className="flex-1 space-y-4 overflow-y-auto pr-2 custom-scrollbar">
+              {/* Specialized Contract Cards */}
+              {contractStatus === "received" && sharedFiles.length > 0 && (
+                <div className="p-4 rounded-2xl bg-gradient-to-br from-blue-500/20 to-blue-600/10 border-2 border-blue-500/30 animate-fade-in-scale">
+                  <div className="flex justify-between items-start mb-3">
+                    <span className="text-[10px] font-black text-blue-400 uppercase tracking-widest">Document Received</span>
+                    <span className="text-[9px] text-blue-400/50">{sharedFiles[sharedFiles.length - 1].timestamp}</span>
+                  </div>
+                  <h4 className="text-sm font-bold text-white mb-2">{sharedFiles[sharedFiles.length - 1].name}</h4>
+                  <div className="grid grid-cols-2 gap-2 mb-4">
+                    <p className="text-[8px] text-white/40 uppercase">Price: <span className="text-white/80 font-bold">{sharedFiles[sharedFiles.length - 1].contract_data.price}</span></p>
+                    <p className="text-[8px] text-white/40 uppercase">Qty: <span className="text-white/80 font-bold">{sharedFiles[sharedFiles.length - 1].contract_data.quantity}</span></p>
+                  </div>
+                  <a
+                    href={sharedFiles[sharedFiles.length - 1].url}
+                    className="block w-full py-2 bg-blue-500 hover:bg-blue-400 text-center rounded-lg text-[10px] font-black text-white uppercase tracking-wider transition-all"
+                  >
+                    Download Agreement
+                  </a>
+                </div>
+              )}
+
               {thoughts.length > 0 ? (
                 thoughts.map((thought) => (
                   <div key={thought.id} className="p-4 rounded-2xl bg-white/5 border border-white/5 animate-fade-in-up">

@@ -49,6 +49,8 @@ class NegotiationAgent(Agent):
         super().__init__(instructions=instructions)
         self.persona = persona
         self.ctx = ctx
+        self.is_awaiting_approval = False
+        self.pending_contract_data = {}
 
 # -------------------------------------------------
 # Server Setup
@@ -83,11 +85,13 @@ async def entrypoint(ctx: JobContext):
     # Role-specific instructions and voice
     if persona == "Halima":
         voice_name = "en-US-JennyNeural" # Azure Voice
-        instructions = f"""You are Halima, a Kenyan farmer selling bulk maize.
+        instructions = f"""You are Halima, a Kenyan farmer selling bulk maize. 
 CRITICAL: This is a realtime voice conversation. Keep responses very brief (1-2 sentences).
 NEGOTIATION RULES:
 - Target: $1.25/kg, Minimum: $1.15/kg.
-- You are speaking with {('Alex' if persona == 'Halima' else 'Halima')}.
+- Negotiate delivery (included or extra) and payment terms (cash on delivery or 7 days).
+- Once terms are settled, say "I'll get the paperwork ready" or "I'll send the contract".
+- You are speaking with Alex.
 """
     else:
         voice_name = "en-US-GuyNeural" # Azure Voice
@@ -95,7 +99,8 @@ NEGOTIATION RULES:
 CRITICAL: This is a realtime voice conversation. Keep responses very brief (1-2 sentences).
 NEGOTIATION RULES:
 - Target: $1.15/kg, Maximum: $1.25/kg.
-- You are speaking with {('Alex' if persona == 'Halima' else 'Halima')}.
+- Discuss delivery and payment terms before agreeing.
+- You are speaking with Halima.
 """
 
     await ctx.connect()
@@ -135,7 +140,7 @@ NEGOTIATION RULES:
         }))
 
         # Send a tactical thought when the agent starts analyzing the conversation
-        if event.new_state == "thinking":
+        if event.new_state == "thinking" and not negotiation_agent.is_awaiting_approval:
             tactical_thoughts = {
                 "Halima": [
                     "Analyzing market demand. Must justify the $1.25 premium.",
@@ -174,6 +179,43 @@ NEGOTIATION RULES:
                     "is_final": True
                 }))
 
+                # CONTRACT INTENT DETECTION (Based on contract-n-history.md)
+                intent_keywords = ["send the contract", "send you the contract", "draft the agreement", "final contract", "paperwork ready", "paperwork for shipment"]
+                if any(kw in text.lower() for kw in intent_keywords) and persona == "Halima":
+                    logger.info(f"📝 {persona} Intent Detected: Drafting contract...")
+                    negotiation_agent.is_awaiting_approval = True
+                    
+                    # EXTRACT TERMS (Simulated structured extraction - in a real app this would be an LLM call)
+                    # For now, we use the context of the agent's final agreement sentence
+                    negotiation_agent.pending_contract_data = {
+                        "buyer": "Alex",
+                        "product": "Maize",
+                        "price": "$1.18/kg", # Defaulting to last mentioned stable price
+                        "quantity": "5000kg",
+                        "delivery": "Free in Nairobi",
+                        "payment": "Cash on delivery"
+                    }
+                    
+                    # 1. Signal "Drafting" status
+                    asyncio.create_task(broadcast_data({
+                        "type": "CONTRACT_INTENT",
+                        "agent": persona,
+                        "status": "drafting"
+                    }))
+
+                    # 2. Emit CONTRACT_PREVIEW after a short simulate "drafting" delay
+                    async def emit_preview():
+                        await asyncio.sleep(2)
+                        await broadcast_data({
+                            "type": "CONTRACT_PREVIEW",
+                            "contract_id": f"ctr_{ctx.room.name}_{persona}",
+                            "agent": persona,
+                            "contract_data": negotiation_agent.pending_contract_data,
+                            "title": "Maize Supply Agreement"
+                        })
+                    
+                    asyncio.create_task(emit_preview())
+
     # Data Packet Listener for State Sync (Agent's internal history sync)
     @ctx.room.on("data_received")
     def on_data_received(dp: rtc.DataPacket):
@@ -186,8 +228,45 @@ NEGOTIATION RULES:
             # Handle SYNC_REQUEST from newly joined browsers
             if data.get("type") == "SYNC_REQUEST":
                 logger.info(f"📥 {persona} received SYNC_REQUEST from dashboard")
-                # Maintain basic sync if needed (transcripts etc)
                 return
+
+            # CONTRACT APPROVAL FLOW (Human-in-the-loop)
+            if data.get("type") == "CONTRACT_APPROVED" and persona == "Halima":
+                logger.info(f"✅ {persona} Contract Approved by User.")
+                negotiation_agent.is_awaiting_approval = False
+                
+                # Finalize and Share
+                asyncio.create_task(broadcast_data({
+                    "type": "FILE_SHARED",
+                    "from": persona,
+                    "filename": "maize_supply_contract_final.pdf",
+                    "url": "#", # Simulated URL
+                    "contract_data": negotiation_agent.pending_contract_data
+                }))
+                
+                # Acknowledge verbally
+                asyncio.create_task(session.generate_reply(
+                    instructions="The user has approved the contract. Tell the buyer you have sent the final document and thank them.",
+                    allow_interruptions=False
+                ))
+
+            elif data.get("type") == "CONTRACT_REJECTED" and persona == "Halima":
+                logger.info(f"❌ {persona} Contract Rejected. Feedback: {data.get('reason')}")
+                negotiation_agent.is_awaiting_approval = False
+                
+                # Acknowledge rejection verbally and resume negotiation
+                asyncio.create_task(session.generate_reply(
+                    instructions=f"The user rejected the contract draft with this feedback: '{data.get('reason')}'. Acknowledge this and ask how to proceed.",
+                    allow_interruptions=False
+                ))
+
+            # RECIPIENT SIDE RESPONSE
+            elif data.get("type") == "FILE_SHARED" and persona == "Alex":
+                logger.info(f"📥 {persona} received final contract. Reacting...")
+                asyncio.create_task(session.generate_reply(
+                    instructions="You just received the final contract from Halima. Tell her you see it and it looks perfect.",
+                    allow_interruptions=False
+                ))
         except Exception as e:
             logger.error(f"Error in data listener: {e}")
 
