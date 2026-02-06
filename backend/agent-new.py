@@ -171,7 +171,8 @@ NEGOTIATION RULES:
 """
 
     await ctx.connect()
-
+    # Identitiy set by LiveKit default (reverting custom metadata to fix Azure TTS XML error)
+    
     # Create AgentSession with stable settings from working sync-agents baseline
     session = AgentSession(
         stt=deepgram.STT(),
@@ -215,16 +216,8 @@ NEGOTIATION RULES:
                 "progress": (negotiation_agent.round / negotiation_agent.max_rounds) * 100
             }))
 
-    @session.on("user_input_transcribed")
-    def on_user_transcript(event: UserInputTranscribedEvent):
-        if event.transcript.strip():
-            # Broadcast the user's transcript to other screens
-            asyncio.create_task(broadcast_data({
-                "type": "SPEECH",
-                "text": event.transcript,
-                "speaker": "Buyer" if persona == "Halima" else "Seller", # The person the agent hears
-                "is_final": event.is_final
-            }))
+    # Removed redundant on_user_transcript broadcast to prevent multi-agent 'he-said/she-said' duplication.
+    # We rely on each speaker (agent or human) to broadcast/publish their own transcripts.
 
     @session.on("conversation_item_added")
     def on_conversation_item(event: ConversationItemAddedEvent):
@@ -236,7 +229,7 @@ NEGOTIATION RULES:
                 asyncio.create_task(broadcast_data({
                     "type": "SPEECH",
                     "text": text,
-                    "speaker": persona,
+                    "speaker": persona, # Always "Halima" or "Alex"
                     "is_final": True
                 }))
                 # Broadcast first part as thought

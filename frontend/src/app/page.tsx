@@ -487,6 +487,10 @@ function DashboardContent({
   const [halimaIsSpeaking, setHalimaIsSpeaking] = useState(false);
   const [alexIsSpeaking, setAlexIsSpeaking] = useState(false);
 
+  // Stable ID and Content-based Deduplication Buffer
+  const lastTranscriptHashes = React.useRef<Set<string>>(new Set());
+  const segmentToId = React.useRef<Map<string, string>>(new Map());
+
   // Track-based role mapping for agents (LiveKit agent IDs are randomized)
   const tracks = useTracks(
     [{ source: Track.Source.Microphone, withPlaceholder: false }],
@@ -572,8 +576,9 @@ function DashboardContent({
     const getAgentFromIdentity = (id?: string, name?: string) => {
       const lowerId = id?.toLowerCase() || "";
       const lowerName = name?.toLowerCase() || "";
-      if (lowerId.includes("halima") || lowerId.includes("juma") || lowerName.includes("halima")) return "Halima";
-      if (lowerId.includes("alex") || lowerName.includes("alex")) return "Alex";
+      if (lowerId.includes("halima") || lowerId.includes("seller") || lowerName.includes("halima")) return "Halima";
+      if (lowerId.includes("alex") || lowerId.includes("buyer") || lowerName.includes("alex")) return "Alex";
+      if (lowerId.startsWith("agent-") || lowerId.startsWith("aj_") || lowerId.includes("-worker")) return "Halima"; // Default primary agent fallback
       return "Agent";
     };
 
@@ -628,8 +633,22 @@ function DashboardContent({
             return next === prev ? prev : next;
           });
         } else if (data.type === "SPEECH" || data.type === "HALIMA_DONE" || data.type === "ALEX_SPEECH") {
-          if (data.text) {
-            const speaker = data.speaker || agentName || "Agent";
+          // Drop interim speech DataPackets; we only want final transcripts in the list
+          if (data.text && data.is_final !== false) {
+            const speaker = data.speaker === "Seller" ? "Halima" : (data.speaker === "Buyer" ? "Alex" : (data.speaker || agentName || "Agent"));
+            // Normalize for hashing: trim, lowercase, strip trailing periods/punctuation
+            const normalizedText = data.text.trim().toLowerCase().replace(/[.!?]+$/, "");
+            const contentHash = `${speaker.toLowerCase()}:${normalizedText}`;
+
+            if (lastTranscriptHashes.current.has(contentHash)) {
+              console.warn("🚫 Dropping Duplicate Speech Packet:", contentHash);
+              return;
+            }
+
+            lastTranscriptHashes.current.add(contentHash);
+            setTimeout(() => lastTranscriptHashes.current.delete(contentHash), 5000);
+
+            console.log("📝 Adding Transcript from Packet:", { speaker, text: data.text });
             setTranscripts(prev => {
               if (prev.some(t => t.text === data.text && t.agent === speaker)) return prev;
               const next = [...prev, { id: crypto.randomUUID(), agent: speaker, text: data.text }];
@@ -661,7 +680,24 @@ function DashboardContent({
       if (finalSegments.length === 0) return;
 
       setTranscripts(prev => {
-        const next = [...prev, ...finalSegments.map(segment => ({ id: crypto.randomUUID(), agent: agentName, text: segment.text }))];
+        const newTranscripts = finalSegments.map(segment => {
+          // Normalize for hashing to catch duplicates across Track/Packet channels
+          const normalizedText = segment.text.trim().toLowerCase().replace(/[.!?]+$/, "");
+          const contentHash = `${agentName.toLowerCase()}:${normalizedText}`;
+
+          if (lastTranscriptHashes.current.has(contentHash)) {
+            console.warn("🚫 Dropping Duplicate Track Transcript:", contentHash);
+            return null;
+          }
+          lastTranscriptHashes.current.add(contentHash);
+          setTimeout(() => lastTranscriptHashes.current.delete(contentHash), 5000);
+
+          console.log("🎙️ Adding Transcript from Track:", { agentName, text: segment.text });
+          return { id: segment.id || crypto.randomUUID(), agent: agentName, text: segment.text };
+        }).filter((t): t is { id: string; agent: string; text: string } => t !== null);
+
+        if (newTranscripts.length === 0) return prev;
+        const next = [...prev, ...newTranscripts];
         return next.length > 50 ? next.slice(-50) : next;
       });
     };
