@@ -19,6 +19,7 @@ from livekit import rtc
 import logging
 import asyncio
 import os
+import random
 from pathlib import Path
 
 # -------------------------------------------------
@@ -133,27 +134,44 @@ NEGOTIATION RULES:
             "is_speaking": event.new_state == "speaking"
         }))
 
+        # Send a tactical thought when the agent starts analyzing the conversation
+        if event.new_state == "thinking":
+            tactical_thoughts = {
+                "Halima": [
+                    "Analyzing market demand. Must justify the $1.25 premium.",
+                    "Evaluating buyer's tone. He seems interested in quality.",
+                    "Calculating transport costs vs. final sale price.",
+                    "Staying firm on the minimum. Maize quality is at its peak."
+                ],
+                "Alex": [
+                    "Scanning for budget overruns. Target is still $1.15.",
+                    "Checking competitor prices. Halima's maize looks superior.",
+                    "Negotiating payment terms - 7 days cash is preferred.",
+                    "Wondering if volume discount is an option."
+                ]
+            }
+            thought = random.choice(tactical_thoughts.get(persona, ["Analyzing current data..."]))
+            asyncio.create_task(broadcast_data({
+                "type": "thought",
+                "agent": persona,
+                "text": thought
+            }))
+
     # Removed redundant on_user_transcript broadcast to prevent multi-agent 'he-said/she-said' duplication.
     # We rely on each speaker (agent or human) to broadcast/publish their own transcripts.
 
     @session.on("conversation_item_added")
     def on_conversation_item(event: ConversationItemAddedEvent):
-        # Broadcast the agent's OWN final transcripts and thoughts
+        # Broadcast the agent's OWN final transcripts
         if event.item.type == "message" and event.item.role == "assistant":
             text = event.item.text_content
             if text and text.strip():
-                # Redundant Speech Sync
+                # Speech Sync: Ensure the transcript appears exactly once in the list
                 asyncio.create_task(broadcast_data({
                     "type": "SPEECH",
                     "text": text,
                     "speaker": persona, # Always "Halima" or "Alex"
                     "is_final": True
-                }))
-                # Broadcast first part as thought
-                asyncio.create_task(broadcast_data({
-                    "type": "thought",
-                    "agent": persona,
-                    "text": f"Finalizing my response: '{text[:50]}...'"
                 }))
 
     # Data Packet Listener for State Sync (Agent's internal history sync)

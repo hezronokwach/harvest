@@ -577,7 +577,8 @@ function DashboardContent({
           const id = `${data.agent}-${crypto.randomUUID()}`;
           setThoughts((prev: Thought[]) => {
             if (prev.some(t => t.text === data.text)) return prev;
-            const next = [{ id, agent: data.agent || "Agent", text: data.text, type: "insight" }, ...prev];
+            const newThought: Thought = { id, agent: data.agent || "Agent", text: data.text, type: "insight" };
+            const next = [newThought, ...prev];
             return next.slice(0, 10);
           });
         } else if (data.type === "SPEECH") {
