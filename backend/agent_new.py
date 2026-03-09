@@ -56,6 +56,7 @@ def resolve_chat_ctx(agent_obj, session_obj, fallback=None):
     Return a chat context object (or None). Handles:
      - negotiation_agent.last_chat_ctx (already a ChatContext)
      - agent_obj.chat_ctx (if agent object exposes it)
+     - session_obj.history (Official SDK context property) [PHASE 17 FIX]
      - session_obj.chat_ctx (if present)
      - fallback value
     """
@@ -63,6 +64,8 @@ def resolve_chat_ctx(agent_obj, session_obj, fallback=None):
         return agent_obj.last_chat_ctx
     if hasattr(agent_obj, "chat_ctx") and getattr(agent_obj, "chat_ctx"):
         return agent_obj.chat_ctx
+    if hasattr(session_obj, "history") and session_obj.history:
+        return session_obj.history
     if hasattr(session_obj, "chat_ctx") and getattr(session_obj, "chat_ctx"):
         return session_obj.chat_ctx
     return fallback
@@ -134,36 +137,59 @@ async def consume_llm_stream(stream):
         text += "".join(content) if isinstance(content, (list, tuple)) else str(content)
     return text
 
-class ContractExtractionContext(llm.FunctionContext):
+class ContractExtractionContext: 
     """Context for LLM to submit structured agreement terms."""
     
     def __init__(self):
         super().__init__()
-        self.extracted_data = None
+        self.extracted_data = {}
 
-    @llm.ai_callable(description="Submit final negotiated terms for the maize supply contract.")
+    @llm.function_tool
     def submit_terms(
         self,
-        buyer: Annotated[str, llm.TypeInfo(description="Name of the buyer (e.g. Alex)")],
-        product: Annotated[str, llm.TypeInfo(description="Product being sold (e.g. White Maize)")],
-        price: Annotated[str, llm.TypeInfo(description="Negotiated price (e.g. $1.20/kg)")],
-        quantity: Annotated[str, llm.TypeInfo(description="Total quantity (e.g. 5 tons)")],
-        delivery: Annotated[str, llm.TypeInfo(description="Delivery location or terms")],
-        payment: Annotated[str, llm.TypeInfo(description="Payment details (e.g. Mobile Money, 50% upfront)")]
+        buyer: str = "",
+        product: str = "",
+        price: str = "",
+        quantity: str = "",
+        delivery: str = "",
+        payment: str = ""
     ):
-        self.extracted_data = {
-            "buyer": buyer, "product": product, "price": price,
-            "quantity": quantity, "delivery": delivery, "payment": payment
+        """Submit final negotiated terms for the maize supply contract.
+        
+        Args:
+            buyer: Name of the buyer (e.g. Alex)
+            product: Product being sold (e.g. White Maize)
+            price: Negotiated price (e.g. $1.20/kg)
+            quantity: Total quantity (e.g. 5 tons)
+            delivery: Delivery location or terms
+            payment: Payment details (e.g. Mobile Money, 50% upfront)
+        """
+        # Idempotent merging: Keep last non-empty value for each field
+        inc = {
+            "buyer": str(buyer or "").strip(),
+            "product": str(product or "").strip(),
+            "price": str(price or "").strip(),
+            "quantity": str(quantity or "").strip(),
+            "delivery": str(delivery or "").strip(),
+            "payment": str(payment or "").strip()
         }
-        logger.info("✅ Tool Call Received: %s", self.extracted_data)
+        for k, v in inc.items():
+            if v:
+                self.extracted_data[k] = v
+        
+        logger.info("✅ Tool Call Received (Idempotent Merge): %s", self.extracted_data)
 
 async def extract_and_preview(agent, session, persona, worker_id, broadcast_data):
-    """Trigger LLM Term Extractor (Phase 8 Reliability)"""
+    """Trigger LLM Term Extractor (Phase 17 Reliability)"""
     global llm_client
     
-    print(f"DEBUG: 🚀 {worker_id} [TASK START] extract_and_preview")
-    # 1. IMMEDIATE Feedback - Signal "Drafting" status BEFORE LLM call
-    logger.warning(f"{worker_id} 📤 Broadcasting CONTRACT_INTENT (Instant Feedback)")
+    # [PHASE 17]: Persona Guard - Only Halima triggers extraction
+    if persona != "Halima":
+        logger.debug("%s Skipping extract_and_preview: Unsupported persona", worker_id)
+        return
+
+    # 1. IMMEDIATE Feedback
+    logger.info(f"{worker_id} 📤 Broadcasting CONTRACT_INTENT")
     await broadcast_data({
         "type": "CONTRACT_INTENT",
         "agent": persona,
@@ -171,92 +197,83 @@ async def extract_and_preview(agent, session, persona, worker_id, broadcast_data
     })
 
     try:
-        # 2. Robust History Extraction
-        ctx_to_use = resolve_chat_ctx(agent, session, fallback=None)
-        logger.debug("%s resolved ctx_to_use type=%s repr=%r", worker_id, type(ctx_to_use), getattr(ctx_to_use, "__dict__", repr(ctx_to_use))[:300])
+        # 2. Resolve History with Fallback
+        raw_ctx = resolve_chat_ctx(agent, session)
+        history_messages = normalize_chat_ctx(raw_ctx)
         
-        try:
-            history_messages = normalize_chat_ctx(ctx_to_use)
-        except Exception as e:
-            logger.error(f"{worker_id} Error normalizing chat context: {e}")
-            history_messages = []
-
-        # If history is empty, provide a hint to the LLM
         if not history_messages:
-            history_text = "No prior messages available. Negotiation just started."
+            # FALLBACK: Use latest transcript if history window is empty
+            last_spoken = ""
+            if hasattr(session, "last_transcript") and session.last_transcript:
+                last_spoken = session.last_transcript
+            
+            history_text = truncate_text(last_spoken or "No prior messages available.", 500)
+            logger.warning(f"{worker_id} History empty. Using fallback: '{history_text[:50]}...'")
         else:
-            # Ensure each contribution to history is flattened to a readable string
-            history_parts = [str(getattr(m, "content", m)) for m in history_messages]
-            raw_history = "\n".join([f"{m.role}: {history_parts[i]}" for i, m in enumerate(history_messages)])
-            history_text = truncate_text(raw_history, 500)
+            raw_history = "\n".join([f"{m.role}: {m.content}" for m in history_messages])
+            history_text = truncate_text(raw_history, 2500)
         
-        print(f"DEBUG: 📝 {worker_id} History Context Size: {len(history_messages)} items (Truncated to {len(history_text)})")
+        sanitized_history = history_text.replace("slice(", "[SLICE_REPR]")
 
-        # Construct messages for extraction (Defensive list-wrapping for Pydantic)
-        messages = [
-            {"role": "system", "content": "You are a specialized Term Extractor for Kenyan maize deals. Analyze the history and once you have the terms, call 'submit_terms'. If a term is unknown, use an empty string \"\" instead of null."},
-            {"role": "user", "content": f"History:\n{history_text}\nExtract terms from the above."}
-        ]
-        
-        print(f"DEBUG: 🧠 {worker_id} Extracting terms with prompt: {[(m['role'], m['content'][:100]) for m in messages]}")
-        
-        # Provision client if not exists
-        if llm_client is None:
-            llm_client = groq.LLM(model="llama-3.1-8b-instant")
-        
-        # Form final messages with strictly normalized content
-        llm_messages = [
-            llm.ChatMessage(role=m["role"], content=normalize_content_for_llm(m["content"], worker_id)) 
-            for m in messages
-        ]
-
-        # Catch-all debug for the "slice" or "None" crash - safe string conversion
-        logger.debug(
-            "%s LLM payload verification: %s",
-            worker_id,
-            [(m.role, [str(x) for x in (m.content or [])][:2]) for m in llm_messages]
-        )
-        
-        # Defensive assertion to fail early in logs if normalization fails
-        for m in llm_messages:
-            if not isinstance(m.content, list) or not all(isinstance(x, str) for x in m.content):
-                raise ValueError(f"CRITICAL: LLM message content must be list[str], got {type(m.content)} with {m.content}")
-
-        # Instantiate the tool context
+        # 3. Extraction with Retry Logic
         fnc_ctx = ContractExtractionContext()
+        extracted_data = None
+        
+        for attempt in range(1, 3):
+            logger.info(f"{worker_id} Extraction Attempt {attempt}/2...")
+            
+            # Instruction Hardening
+            system_instruction = (
+                "You are a specialized Term Extractor for Kenyan maize deals. Analyze the history and call 'submit_terms'. "
+                "You MUST call 'submit_terms' EXACTLY once with all fields. Use empty string \"\" for unknown fields."
+            )
+            if attempt > 1:
+                system_instruction += " CRITICAL: Previous attempt failed. You MUST call submit_terms now."
 
-        # Start the chat with the tool
-        chat = llm_client.chat(chat_ctx=llm.ChatContext(items=llm_messages), fnc_ctx=fnc_ctx)
-        
-        # We await the full completion of the tool call/response
-        await chat
-        
-        extracted_data = fnc_ctx.extracted_data
+            messages = [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": f"History:\n{sanitized_history}\nExtract terms from the above."}
+            ]
+            
+            llm_messages = [llm.ChatMessage(role=m["role"], content=normalize_content_for_llm(m["content"], worker_id)) for m in messages]
+
+            # Provision client if needed
+            if llm_client is None:
+                llm_client = groq.LLM(model="llama-3.3-70b-versatile")
+
+            chat = llm_client.chat(
+                chat_ctx=llm.ChatContext(items=llm_messages),
+                tools=[fnc_ctx.submit_terms]
+            )
+
+            async for _ in chat: # Consume stream
+                pass
+
+            if fnc_ctx.extracted_data:
+                extracted_data = fnc_ctx.extracted_data
+                logger.info(f"{worker_id} Extraction succeeded on attempt {attempt}")
+                break
+            
+            if attempt < 2:
+                logger.warning(f"{worker_id} Extraction failed on attempt {attempt}. Retrying...")
+                await asyncio.sleep(0.5)
+
         if not extracted_data:
-            logger.warning(f"{worker_id} LLM did not call the extraction tool.")
-            extracted_data = {}
-
-        # Sanity Check: Ensure we have at least SOME data
-        meaningful_keys = ["buyer", "product", "price", "quantity", "delivery", "payment"]
-        is_empty = not any(extracted_data.get(k) for k in meaningful_keys)
-        
-        if is_empty:
-            logger.error(f"{worker_id} Term extraction yielded empty data. Aborting preview.")
+            logger.error(f"{worker_id} Term extraction yielded empty data after retries.")
             await broadcast_data({
                 "type": "CONTRACT_PREVIEW_ERROR",
                 "agent": persona,
-                "error": "empty_extraction",
+                "error": "EMPTY_EXTRACTION",
                 "message": "I couldn't catch the deal details clearly. Please mention price and quantity again."
             })
             agent.is_awaiting_approval = False
             return
 
-        # Populate missing fields with defaults
+        # 4. Populate and Broadcast Preview
         defaults = {
             "buyer": "Alex", "product": "Maize", "price": "Negotiated",
             "quantity": "Negotiated", "delivery": "Discussed", "payment": "Discussed"
         }
-        print(f"DEBUG: 📋 {worker_id} Extracted Data: {extracted_data}")
         agent.pending_contract_data = {**defaults, **extracted_data}
         
         preview_payload = {
@@ -266,16 +283,16 @@ async def extract_and_preview(agent, session, persona, worker_id, broadcast_data
             "contract_data": agent.pending_contract_data,
             "title": "Maize Supply Agreement (Draft)"
         }
-        print(f"DEBUG: 📤 {worker_id} Broadcasting preview payload keys: {list(preview_payload.keys())}")
         await broadcast_data(preview_payload)
 
     except Exception as e:
-        logger.error(f"{worker_id} Critical Error in Term Extraction: {e}")
-        err_text = str(e)
+        logger.error(f"{worker_id} Critical Error in Term Extraction: {e}", exc_info=True)
+        err_text = str(e)[:500].replace("slice(", "[SLICE_REPR]")
         await broadcast_data({
             "type": "CONTRACT_PREVIEW_ERROR",
             "agent": persona,
-            "error": err_text[:500]
+            "error": "FATAL_ERROR",
+            "message": f"Deep analysis failed: {err_text[:100]}"
         })
         agent.is_awaiting_approval = False
 
@@ -294,6 +311,8 @@ class NegotiationAgent(Agent):
     async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
         """Idiomatic way to silence the agent during the drafting phase."""
         self.last_chat_ctx = turn_ctx # Robust history capture
+        # [PHASE 17 DEBUG]
+        logger.debug("%s captured history turn: %d messages in context", self.persona, len(turn_ctx.items))
         if self.is_awaiting_approval:
             print(f"DEBUG: 🤫 [SILENCE] {self.persona} is awaiting contract approval. Aborting response.")
             raise StopResponse()
@@ -455,16 +474,11 @@ NEGOTIATION RULES:
                     else:
                         print(f"DEBUG: 🚫 [NO MATCH] Speech did not contain closing intent.")
 
-        # 3. USER INTENT FALLBACK (If Alex says "send paperwork")
-        elif role == "user" and persona == "Halima":
-            if text:
-                if re.search(r"(send.*contract|finalize.*deal|sign.*paperwork|ready.*paperwork|get.*paperwork|finalize.*details|we're set|sounds like a deal)", text.lower()):
-                    print(f"DEBUG: 💡 [USER INTENT] Detected deal closure from user: '{text[:30]}'")
-                    if not negotiation_agent.is_awaiting_approval:
-                        print(f"DEBUG: ✅ [TRIGGER] Calling extract_and_preview (USER FALLBACK)")
-                        negotiation_agent.is_awaiting_approval = True
-                        session.interrupt()
-                        asyncio.create_task(extract_and_preview(negotiation_agent, session, persona, current_worker_id, broadcast_data))
+                        print(f"DEBUG: 🚫 [NO MATCH] Speech did not contain closing intent.")
+
+        # 3. USER INTENT FALLBACK - [REMOVED IN PHASE 16]
+        # We now only trigger extraction if Halima (the seller) explicitly offers the paperwork.
+        # This prevents accidental triggers from the buyer's speech.
 
     # Data Packet Listener for State Sync (Agent's internal history sync)
     @ctx.room.on("data_received")
